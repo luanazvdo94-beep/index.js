@@ -30,11 +30,11 @@ app.post('/webhook', async (req, res) => {
 
     let mensagem = '';
 
-    if (buttonId === 'SIM') {
-      mensagem = 'Perfeito! Você está trabalhando atualmente de carteira assinada?';
-    } else if (buttonId === 'NAO') {
-      mensagem = 'Sem problemas. Se precisar no futuro, é só me chamar.';
-    }
+    if (buttonId === '1') {
+    mensagem = 'Perfeito! Você está trabalhando atualmente de carteira assinada?';
+} else if (buttonId === '2') {
+    mensagem = 'Sem problemas. Se precisar no futuro, é só me chamar.';
+}
 
     if (mensagem) {
       await axios.post(
