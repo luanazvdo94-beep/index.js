@@ -22,7 +22,7 @@ app.post('/webhook', async (req, res) => {
     console.log('Evento recebido:', JSON.stringify(data, null, 2));
 
     const phone = data.phone;
-    const buttonId = data.buttonId;
+    const buttonId = data.buttonsResponseMessage?.buttonId;
 
     if (!phone || !buttonId) {
       return res.sendStatus(200);
