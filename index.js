@@ -17,8 +17,28 @@ async function sendText(phone, message) {
   await axios.post(
     `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`,
     {
-      phone: phone,
-      message: message
+      phone,
+      message
+    },
+    {
+      headers: {
+        'Client-Token': ZAPI_CLIENT_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    }
+  );
+}
+
+// FUNÇÃO PARA ENVIAR BOTÕES
+async function sendButtonList(phone, message, buttons) {
+  await axios.post(
+    `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-button-list`,
+    {
+      phone,
+      message,
+      buttonList: {
+        buttons
+      }
     },
     {
       headers: {
@@ -45,42 +65,64 @@ app.post('/webhook', async (req, res) => {
     const buttonId = data.buttonsResponseMessage?.buttonId;
     const textMessage =
       data.text?.message ||
+      data.textMessage?.message ||
       data.message ||
       data.body ||
-      data.textMessage?.message ||
       '';
 
     if (!phone) {
       return res.sendStatus(200);
     }
 
-    // 1) TRATAMENTO DE BOTÕES
+    // TRATAMENTO DE CLIQUE NOS BOTÕES
     if (buttonId) {
-      let mensagem = '';
-
       if (buttonId === '1') {
-        mensagem = 'Perfeito. Para eu seguir com a análise, me confirma uma informação:\n\nVocê está trabalhando atualmente de carteira assinada?';
+        await sendButtonList(
+          phone,
+          'Perfeito. Para eu seguir com a análise, me confirma uma informação:\n\nVocê está trabalhando atualmente de carteira assinada?',
+          [
+            { id: '11', label: 'Sim, estou trabalhando' },
+            { id: '12', label: 'Não estou trabalhando' }
+          ]
+        );
       } else if (buttonId === '2') {
-        mensagem = 'Tem certeza? Se mudar de ideia, estaremos à disposição!\nPara mais informações, siga-nos nas redes sociais no Instagram @numonpromotora.\nObrigado pela atenção.';
+        await sendText(
+          phone,
+          'Tem certeza? Se mudar de ideia, estaremos à disposição!\nPara mais informações, siga-nos nas redes sociais no Instagram @numonpromotora.\nObrigado pela atenção.'
+        );
       } else if (buttonId === '11') {
-        mensagem = 'A quanto tempo você está trabalhando na empresa atual?';
+        await sendButtonList(
+          phone,
+          'A quanto tempo você está trabalhando na empresa atual?',
+          [
+            { id: '111', label: 'Menos de 03 meses' },
+            { id: '112', label: 'De 03 meses a 01 ano' },
+            { id: '113', label: 'Acima de 01 ano' }
+          ]
+        );
       } else if (buttonId === '12') {
-        mensagem = 'Entendi. Hoje essa modalidade é destinada para quem está com vínculo CLT ativo.\n\nSe sua situação mudar, estaremos à disposição!\nPara mais informações, siga-nos nas redes sociais no Instagram @numonpromotora.\nObrigado pela atenção.';
+        await sendText(
+          phone,
+          'Entendi. Hoje essa modalidade é destinada para quem está com vínculo CLT ativo.\n\nSe sua situação mudar, estaremos à disposição!\nPara mais informações, siga-nos nas redes sociais no Instagram @numonpromotora.\nObrigado pela atenção.'
+        );
       } else if (buttonId === '111') {
-        mensagem = 'O crédito privado é destinado a pessoas com vínculo CLT ativo há pelo menos 03 meses.\n\nNão desanime, assim que estiver elegível entraremos em contato.\nPara mais informações, siga-nos nas redes sociais no Instagram @numonpromotora.\nObrigado pela atenção.';
+        await sendText(
+          phone,
+          'O crédito privado é destinado a pessoas com vínculo CLT ativo há pelo menos 03 meses.\n\nNão desanime, assim que estiver elegível entraremos em contato.\nPara mais informações, siga-nos nas redes sociais no Instagram @numonpromotora.\nObrigado pela atenção.'
+        );
       } else if (buttonId === '112' || buttonId === '113') {
-        mensagem = 'Perfeito! Agora para a simulação, informe: Nome Completo e CPF:';
         conversationState[phone] = 'aguardando_dados';
-      }
 
-      if (mensagem) {
-        await sendText(phone, mensagem);
+        await sendText(
+          phone,
+          'Perfeito! Agora para a simulação, informe: Nome Completo e CPF:'
+        );
       }
 
       return res.sendStatus(200);
     }
 
-    // 2) TRATAMENTO DE TEXTO LIVRE APÓS 112 OU 113
+    // TRATAMENTO DE TEXTO LIVRE APÓS 112 OU 113
     if (conversationState[phone] === 'aguardando_dados' && textMessage.trim()) {
       await sendText(
         phone,
@@ -93,7 +135,10 @@ app.post('/webhook', async (req, res) => {
 
     return res.sendStatus(200);
   } catch (error) {
-    console.error('Erro no webhook:', error.response?.data || error.message);
+    console.error(
+      'Erro no webhook:',
+      error.response?.data || error.message
+    );
     return res.sendStatus(500);
   }
 });
