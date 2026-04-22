@@ -76,26 +76,42 @@ async function sendButtonList(phone, message, buttons) {
 // FUNÇÃO PARA ATUALIZAR LEAD NO SUPABASE
 async function updateLeadMessageInfo(leadId, messageText) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    console.error('DEBUG SUPABASE_URL:', SUPABASE_URL);
+    console.error(
+      'DEBUG SUPABASE_SERVICE_ROLE_KEY exists:',
+      !!SUPABASE_SERVICE_ROLE_KEY
+    );
     throw new Error('SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configurados.');
   }
 
   const nowIso = new Date().toISOString();
 
-  await axios.patch(
-    `${SUPABASE_URL}/rest/v1/leads?id=eq.${leadId}`,
-    {
-      last_message_sent_at: nowIso,
-      last_message_sent_text: messageText
-    },
-    {
-      headers: {
-        apikey: SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-        'Content-Type': 'application/json',
-        Prefer: 'return=representation'
+  try {
+    const response = await axios.patch(
+      `${SUPABASE_URL}/rest/v1/leads?id=eq.${leadId}`,
+      {
+        last_message_sent_at: nowIso,
+        last_message_sent_text: messageText
+      },
+      {
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation'
+        }
       }
-    }
-  );
+    );
+
+    console.log('SUPABASE UPDATE OK:', response.data);
+  } catch (error) {
+    console.error(
+      'SUPABASE UPDATE ERROR:',
+      error.response?.status,
+      error.response?.data || error.message
+    );
+    throw error;
+  }
 
   return nowIso;
 }
