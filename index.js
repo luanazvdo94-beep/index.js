@@ -237,7 +237,6 @@ app.post('/webhook', async (req, res) => {
     if (!phone) return res.sendStatus(200);
 
     if (buttonId) {
-
       if (buttonId === '1') {
         const ok = await sendTemplateFlow(phone, 'resposta_button_1');
         if (!ok) {
@@ -253,10 +252,13 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (buttonId === '2') {
-        await sendText(
-          phone,
-          'Tem certeza? Se mudar de ideia, estaremos à disposição!'
-        );
+        const ok = await sendTemplateFlow(phone, 'resposta_button_2');
+        if (!ok) {
+          await sendText(
+            phone,
+            'Tem certeza? Se mudar de ideia, estaremos à disposição!'
+          );
+        }
       }
 
       if (buttonId === '11') {
