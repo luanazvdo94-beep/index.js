@@ -28,8 +28,6 @@ const conversationState = {};
 // ========================
 // FALLBACK TEMPORÁRIO
 // ========================
-// Mantido para não quebrar nada durante a migração.
-// O ideal é migrarmos tudo depois para a tabela whatsapp_templates.
 const templates = {
   modelo_1: (nome, empresa) => `
 Oi ${nome}, tudo bem?
@@ -53,7 +51,7 @@ Posso te mostrar como funciona sem compromisso?
 };
 
 // ========================
-// FUNÇÕES AUXILIARES SUPABASE
+// SUPABASE
 // ========================
 function getSupabaseHeaders() {
   return {
@@ -63,23 +61,41 @@ function getSupabaseHeaders() {
   };
 }
 
+// 🔥 FUNÇÃO COM DEBUG COMPLETO
 async function getTemplateByKey(key) {
-  const response = await axios.get(
-    `${SUPABASE_URL}/rest/v1/whatsapp_templates?key=eq.${encodeURIComponent(
+  try {
+    console.log('🔍 Buscando template:', key);
+    console.log('🌐 SUPABASE_URL:', SUPABASE_URL);
+
+    const url = `${SUPABASE_URL}/rest/v1/whatsapp_templates?key=eq.${encodeURIComponent(
       key
-    )}&is_active=eq.true&select=*`,
-    {
+    )}&is_active=eq.true&select=*`;
+
+    console.log('📡 URL FINAL:', url);
+
+    const response = await axios.get(url, {
       headers: getSupabaseHeaders(),
+    });
+
+    console.log('📦 RESPOSTA BRUTA:', response.data);
+
+    const rows = response.data;
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      console.log('⚠️ Template NÃO encontrado no Supabase');
+      return null;
     }
-  );
 
-  const rows = response.data;
+    console.log('✅ Template encontrado:', rows[0]);
 
-  if (!Array.isArray(rows) || rows.length === 0) {
+    return rows[0];
+  } catch (error) {
+    console.error(
+      '❌ ERRO AO BUSCAR TEMPLATE:',
+      error.response?.data || error.message
+    );
     return null;
   }
-
-  return rows[0];
 }
 
 function renderTemplate(templateText, variables = {}) {
@@ -97,12 +113,10 @@ function renderTemplate(templateText, variables = {}) {
 function mapButtonsForZApi(buttons = []) {
   if (!Array.isArray(buttons)) return [];
 
-  return buttons
-    .filter((button) => button && button.id && button.text)
-    .map((button) => ({
-      id: String(button.id),
-      label: String(button.text),
-    }));
+  return buttons.map((button) => ({
+    id: String(button.id),
+    label: String(button.text),
+  }));
 }
 
 async function buildMessageFromTemplate({ templateKey, nome, empresa }) {
@@ -120,15 +134,17 @@ async function buildMessageFromTemplate({ templateKey, nome, empresa }) {
       source: 'supabase',
       message,
       buttons,
-      template: dbTemplate,
     };
   }
 
   const fallbackTemplateFn = templates[templateKey];
 
   if (!fallbackTemplateFn) {
+    console.log('❌ Nenhum template encontrado nem fallback');
     return null;
   }
+
+  console.log('⚠️ Usando FALLBACK');
 
   return {
     source: 'fallback',
@@ -137,12 +153,11 @@ async function buildMessageFromTemplate({ templateKey, nome, empresa }) {
       { id: '1', label: 'Sim, quero ver' },
       { id: '2', label: 'Não tenho interesse' },
     ],
-    template: null,
   };
 }
 
 // ========================
-// FUNÇÕES Z-API
+// Z-API
 // ========================
 async function sendText(phone, message) {
   await axios.post(
@@ -175,7 +190,7 @@ async function sendButtonList(phone, message, buttons) {
 }
 
 // ========================
-// SUPABASE UPDATE
+// UPDATE LEAD
 // ========================
 async function updateLeadMessageInfo(leadId, messageText) {
   const now = new Date().toISOString();
@@ -202,7 +217,7 @@ app.get('/', (req, res) => {
 });
 
 // ========================
-// DISPARO VIA CRM
+// DISPARO
 // ========================
 app.post('/send-indication-message', async (req, res) => {
   try {
@@ -214,6 +229,8 @@ app.post('/send-indication-message', async (req, res) => {
     }
 
     const { leadId, phone, templateKey, nome, empresa } = req.body;
+
+    console.log('🚀 DISPARO:', { leadId, phone, templateKey, nome, empresa });
 
     if (!leadId || !phone || !templateKey) {
       return res.status(400).json({
@@ -237,6 +254,8 @@ app.post('/send-indication-message', async (req, res) => {
 
     const { message, buttons, source } = builtTemplate;
 
+    console.log('📤 Enviando mensagem via:', source);
+
     if (buttons.length > 0) {
       await sendButtonList(phone, message, buttons);
     } else {
@@ -251,18 +270,17 @@ app.post('/send-indication-message', async (req, res) => {
     });
   } catch (error) {
     console.error(
-      'Erro em /send-indication-message:',
+      '❌ ERRO NO DISPARO:',
       error.response?.data || error.message
     );
     return res.status(500).json({
       success: false,
-      error: 'Erro interno ao enviar mensagem',
     });
   }
 });
 
 // ========================
-// WEBHOOK AUTOMAÇÃO
+// WEBHOOK (inalterado)
 // ========================
 app.post('/webhook', async (req, res) => {
   try {
