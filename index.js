@@ -26,31 +26,6 @@ const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
 const conversationState = {};
 
 // ========================
-// FALLBACK TEMPORÁRIO
-// ========================
-const templates = {
-  modelo_1: (nome, empresa) => `
-Oi ${nome}, tudo bem?
-
-Vi uma possibilidade que pode fazer sentido para você pela ${empresa}, na linha do crédito Privado CLT.
-
-Queria só confirmar duas coisas rapidamente:
-• Você ainda trabalha na ${empresa}?
-• De quanto você precisa hoje?
-
-Se fizer sentido, eu verifico isso pra você sem compromisso.
-`.trim(),
-
-  modelo_2: (nome, empresa) => `
-Olá ${nome},
-
-Analisei um cenário aqui que pode ser interessante para quem trabalha na ${empresa}.
-
-Posso te mostrar como funciona sem compromisso?
-`.trim(),
-};
-
-// ========================
 // SUPABASE
 // ========================
 function getSupabaseHeaders() {
@@ -225,7 +200,11 @@ app.post('/send-indication-message', async (req, res) => {
 
     const buttons = mapButtonsForZApi(template.buttons || []);
 
-    await sendButtonList(phone, message, buttons);
+    if (buttons.length > 0) {
+      await sendButtonList(phone, message, buttons);
+    } else {
+      await sendText(phone, message);
+    }
 
     await updateLeadMessageInfo(leadId, message);
 
@@ -240,7 +219,7 @@ app.post('/send-indication-message', async (req, res) => {
 });
 
 // ========================
-// WEBHOOK (ATUALIZADO)
+// WEBHOOK FINAL
 // ========================
 app.post('/webhook', async (req, res) => {
   try {
@@ -258,16 +237,13 @@ app.post('/webhook', async (req, res) => {
     if (!phone) return res.sendStatus(200);
 
     if (buttonId) {
-      if (buttonId === '1') {
-        const usedTemplate = await sendTemplateFlow(
-          phone,
-          'resposta_button_1'
-        );
 
-        if (!usedTemplate) {
+      if (buttonId === '1') {
+        const ok = await sendTemplateFlow(phone, 'resposta_button_1');
+        if (!ok) {
           await sendButtonList(
             phone,
-            'Perfeito. Para eu seguir com a análise, me confirma uma informação:\n\nVocê está trabalhando atualmente de carteira assinada?',
+            'Perfeito. Para eu seguir com a análise...',
             [
               { id: '11', label: 'Sim, estou trabalhando' },
               { id: '12', label: 'Não estou trabalhando' },
@@ -279,17 +255,13 @@ app.post('/webhook', async (req, res) => {
       if (buttonId === '2') {
         await sendText(
           phone,
-          'Tem certeza? Se mudar de ideia, estaremos à disposição!\nSiga @numonpromotora.\nObrigado.'
+          'Tem certeza? Se mudar de ideia, estaremos à disposição!'
         );
       }
 
       if (buttonId === '11') {
-        const usedTemplate = await sendTemplateFlow(
-          phone,
-          'resposta_button_11'
-        );
-
-        if (!usedTemplate) {
+        const ok = await sendTemplateFlow(phone, 'resposta_button_11');
+        if (!ok) {
           await sendButtonList(
             phone,
             'A quanto tempo você está trabalhando na empresa atual?',
@@ -303,33 +275,40 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (buttonId === '12') {
-        await sendText(
-          phone,
-          'Essa modalidade exige vínculo CLT ativo.\nSe mudar, estamos aqui.'
-        );
+        const ok = await sendTemplateFlow(phone, 'resposta_button_12');
+        if (!ok) {
+          await sendText(phone, 'Essa modalidade exige vínculo CLT ativo.');
+        }
       }
 
       if (buttonId === '111') {
-        await sendText(phone, 'Necessário mínimo 3 meses de empresa.');
+        const ok = await sendTemplateFlow(phone, 'resposta_button_111');
+        if (!ok) {
+          await sendText(phone, 'Necessário mínimo 3 meses.');
+        }
       }
 
       if (buttonId === '112' || buttonId === '113') {
         conversationState[phone] = 'aguardando_dados';
 
-        await sendText(
-          phone,
-          'Perfeito! Agora me informe Nome Completo e CPF:'
-        );
+        const ok = await sendTemplateFlow(phone, 'resposta_button_112_113');
+        if (!ok) {
+          await sendText(phone, 'Me informe Nome e CPF');
+        }
       }
 
       return res.sendStatus(200);
     }
 
     if (conversationState[phone] === 'aguardando_dados' && textMessage.trim()) {
-      await sendText(
-        phone,
-        'Recebi suas informações. Vou analisar e já retorno.'
-      );
+      const ok = await sendTemplateFlow(phone, 'resposta_dados_recebidos');
+
+      if (!ok) {
+        await sendText(
+          phone,
+          'Recebi suas informações. Vou analisar e já retorno.'
+        );
+      }
 
       conversationState[phone] = 'humano';
       return res.sendStatus(200);
