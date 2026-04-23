@@ -26,8 +26,10 @@ const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
 const conversationState = {};
 
 // ========================
-// TEMPLATES DE DISPARO
+// FALLBACK TEMPORÁRIO
 // ========================
+// Mantido para não quebrar nada durante a migração.
+// O ideal é migrarmos tudo depois para a tabela whatsapp_templates.
 const templates = {
   modelo_1: (nome, empresa) => `
 Oi ${nome}, tudo bem?
@@ -49,6 +51,95 @@ Analisei um cenário aqui que pode ser interessante para quem trabalha na ${empr
 Posso te mostrar como funciona sem compromisso?
 `.trim(),
 };
+
+// ========================
+// FUNÇÕES AUXILIARES SUPABASE
+// ========================
+function getSupabaseHeaders() {
+  return {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    'Content-Type': 'application/json',
+  };
+}
+
+async function getTemplateByKey(key) {
+  const response = await axios.get(
+    `${SUPABASE_URL}/rest/v1/whatsapp_templates?key=eq.${encodeURIComponent(
+      key
+    )}&is_active=eq.true&select=*`,
+    {
+      headers: getSupabaseHeaders(),
+    }
+  );
+
+  const rows = response.data;
+
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return null;
+  }
+
+  return rows[0];
+}
+
+function renderTemplate(templateText, variables = {}) {
+  let output = templateText || '';
+
+  Object.entries(variables).forEach(([key, value]) => {
+    const safeValue = value ?? '';
+    const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
+    output = output.replace(regex, String(safeValue));
+  });
+
+  return output;
+}
+
+function mapButtonsForZApi(buttons = []) {
+  if (!Array.isArray(buttons)) return [];
+
+  return buttons
+    .filter((button) => button && button.id && button.text)
+    .map((button) => ({
+      id: String(button.id),
+      label: String(button.text),
+    }));
+}
+
+async function buildMessageFromTemplate({ templateKey, nome, empresa }) {
+  const dbTemplate = await getTemplateByKey(templateKey);
+
+  if (dbTemplate) {
+    const message = renderTemplate(dbTemplate.message_text, {
+      nome: nome || 'Cliente',
+      empresa: empresa || 'sua empresa',
+    });
+
+    const buttons = mapButtonsForZApi(dbTemplate.buttons || []);
+
+    return {
+      source: 'supabase',
+      message,
+      buttons,
+      template: dbTemplate,
+    };
+  }
+
+  const fallbackTemplateFn = templates[templateKey];
+
+  if (!fallbackTemplateFn) {
+    return null;
+  }
+
+  return {
+    source: 'fallback',
+    message: fallbackTemplateFn(nome || 'Cliente', empresa || 'sua empresa'),
+    buttons: [
+      { id: '1', label: 'Sim, quero ver' },
+      { id: '2', label: 'Não tenho interesse' },
+    ],
+    template: null,
+  };
+}
 
 // ========================
 // FUNÇÕES Z-API
@@ -96,11 +187,7 @@ async function updateLeadMessageInfo(leadId, messageText) {
       last_message_sent_text: messageText,
     },
     {
-      headers: {
-        apikey: SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-        'Content-Type': 'application/json',
-      },
+      headers: getSupabaseHeaders(),
     }
   );
 
@@ -129,29 +216,48 @@ app.post('/send-indication-message', async (req, res) => {
     const { leadId, phone, templateKey, nome, empresa } = req.body;
 
     if (!leadId || !phone || !templateKey) {
-      return res.status(400).json({ success: false });
+      return res.status(400).json({
+        success: false,
+        error: 'leadId, phone e templateKey são obrigatórios',
+      });
     }
 
-    const templateFn = templates[templateKey];
+    const builtTemplate = await buildMessageFromTemplate({
+      templateKey,
+      nome,
+      empresa,
+    });
 
-    if (!templateFn) {
-      return res.status(400).json({ success: false, error: 'Template inválido' });
+    if (!builtTemplate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Template inválido',
+      });
     }
 
-    const message = templateFn(nome || 'Cliente', empresa || 'sua empresa');
+    const { message, buttons, source } = builtTemplate;
 
-    // 🔥 ENVIO COM BOTÕES
-    await sendButtonList(phone, message, [
-      { id: '1', label: 'Sim, quero ver' },
-      { id: '2', label: 'Não tenho interesse' },
-    ]);
+    if (buttons.length > 0) {
+      await sendButtonList(phone, message, buttons);
+    } else {
+      await sendText(phone, message);
+    }
 
     await updateLeadMessageInfo(leadId, message);
 
-    return res.json({ success: true });
+    return res.json({
+      success: true,
+      templateSource: source,
+    });
   } catch (error) {
-    console.error(error.response?.data || error.message);
-    return res.status(500).json({ success: false });
+    console.error(
+      'Erro em /send-indication-message:',
+      error.response?.data || error.message
+    );
+    return res.status(500).json({
+      success: false,
+      error: 'Erro interno ao enviar mensagem',
+    });
   }
 });
 
@@ -212,10 +318,7 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (buttonId === '111') {
-        await sendText(
-          phone,
-          'Necessário mínimo 3 meses de empresa.'
-        );
+        await sendText(phone, 'Necessário mínimo 3 meses de empresa.');
       }
 
       if (buttonId === '112' || buttonId === '113') {
@@ -242,7 +345,7 @@ app.post('/webhook', async (req, res) => {
 
     return res.sendStatus(200);
   } catch (error) {
-    console.error(error.response?.data || error.message);
+    console.error('Erro em /webhook:', error.response?.data || error.message);
     return res.sendStatus(500);
   }
 });
