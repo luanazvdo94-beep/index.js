@@ -61,39 +61,28 @@ function getSupabaseHeaders() {
   };
 }
 
-// 🔥 FUNÇÃO COM DEBUG COMPLETO
 async function getTemplateByKey(key) {
   try {
     console.log('🔍 Buscando template:', key);
-    console.log('🌐 SUPABASE_URL:', SUPABASE_URL);
 
     const url = `${SUPABASE_URL}/rest/v1/whatsapp_templates?key=eq.${encodeURIComponent(
       key
     )}&is_active=eq.true&select=*`;
 
-    console.log('📡 URL FINAL:', url);
-
     const response = await axios.get(url, {
       headers: getSupabaseHeaders(),
     });
 
-    console.log('📦 RESPOSTA BRUTA:', response.data);
-
     const rows = response.data;
 
     if (!Array.isArray(rows) || rows.length === 0) {
-      console.log('⚠️ Template NÃO encontrado no Supabase');
+      console.log('⚠️ Template NÃO encontrado:', key);
       return null;
     }
 
-    console.log('✅ Template encontrado:', rows[0]);
-
     return rows[0];
   } catch (error) {
-    console.error(
-      '❌ ERRO AO BUSCAR TEMPLATE:',
-      error.response?.data || error.message
-    );
+    console.error('❌ ERRO AO BUSCAR TEMPLATE:', error.message);
     return null;
   }
 }
@@ -102,9 +91,8 @@ function renderTemplate(templateText, variables = {}) {
   let output = templateText || '';
 
   Object.entries(variables).forEach(([key, value]) => {
-    const safeValue = value ?? '';
     const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
-    output = output.replace(regex, String(safeValue));
+    output = output.replace(regex, value ?? '');
   });
 
   return output;
@@ -113,47 +101,32 @@ function renderTemplate(templateText, variables = {}) {
 function mapButtonsForZApi(buttons = []) {
   if (!Array.isArray(buttons)) return [];
 
-  return buttons.map((button) => ({
-    id: String(button.id),
-    label: String(button.text),
+  return buttons.map((b) => ({
+    id: String(b.id),
+    label: String(b.text),
   }));
 }
 
-async function buildMessageFromTemplate({ templateKey, nome, empresa }) {
-  const dbTemplate = await getTemplateByKey(templateKey);
+// 🔥 NOVA FUNÇÃO PARA WEBHOOK
+async function sendTemplateFlow(phone, templateKey) {
+  const template = await getTemplateByKey(templateKey);
 
-  if (dbTemplate) {
-    const message = renderTemplate(dbTemplate.message_text, {
-      nome: nome || 'Cliente',
-      empresa: empresa || 'sua empresa',
-    });
+  if (template) {
+    const message = renderTemplate(template.message_text, {});
+    const buttons = mapButtonsForZApi(template.buttons || []);
 
-    const buttons = mapButtonsForZApi(dbTemplate.buttons || []);
+    if (buttons.length > 0) {
+      await sendButtonList(phone, message, buttons);
+    } else {
+      await sendText(phone, message);
+    }
 
-    return {
-      source: 'supabase',
-      message,
-      buttons,
-    };
+    console.log('✅ Fluxo via template:', templateKey);
+    return true;
   }
 
-  const fallbackTemplateFn = templates[templateKey];
-
-  if (!fallbackTemplateFn) {
-    console.log('❌ Nenhum template encontrado nem fallback');
-    return null;
-  }
-
-  console.log('⚠️ Usando FALLBACK');
-
-  return {
-    source: 'fallback',
-    message: fallbackTemplateFn(nome || 'Cliente', empresa || 'sua empresa'),
-    buttons: [
-      { id: '1', label: 'Sim, quero ver' },
-      { id: '2', label: 'Não tenho interesse' },
-    ],
-  };
+  console.log('⚠️ Fluxo fallback:', templateKey);
+  return false;
 }
 
 // ========================
@@ -230,57 +203,45 @@ app.post('/send-indication-message', async (req, res) => {
 
     const { leadId, phone, templateKey, nome, empresa } = req.body;
 
-    console.log('🚀 DISPARO:', { leadId, phone, templateKey, nome, empresa });
-
     if (!leadId || !phone || !templateKey) {
       return res.status(400).json({
         success: false,
-        error: 'leadId, phone e templateKey são obrigatórios',
+        error: 'Campos obrigatórios faltando',
       });
     }
 
-    const builtTemplate = await buildMessageFromTemplate({
-      templateKey,
+    const template = await getTemplateByKey(templateKey);
+
+    if (!template) {
+      return res.status(400).json({
+        success: false,
+        error: 'Template não encontrado',
+      });
+    }
+
+    const message = renderTemplate(template.message_text, {
       nome,
       empresa,
     });
 
-    if (!builtTemplate) {
-      return res.status(400).json({
-        success: false,
-        error: 'Template inválido',
-      });
-    }
+    const buttons = mapButtonsForZApi(template.buttons || []);
 
-    const { message, buttons, source } = builtTemplate;
-
-    console.log('📤 Enviando mensagem via:', source);
-
-    if (buttons.length > 0) {
-      await sendButtonList(phone, message, buttons);
-    } else {
-      await sendText(phone, message);
-    }
+    await sendButtonList(phone, message, buttons);
 
     await updateLeadMessageInfo(leadId, message);
 
     return res.json({
       success: true,
-      templateSource: source,
+      templateSource: 'supabase',
     });
   } catch (error) {
-    console.error(
-      '❌ ERRO NO DISPARO:',
-      error.response?.data || error.message
-    );
-    return res.status(500).json({
-      success: false,
-    });
+    console.error(error);
+    return res.status(500).json({ success: false });
   }
 });
 
 // ========================
-// WEBHOOK (inalterado)
+// WEBHOOK (ATUALIZADO)
 // ========================
 app.post('/webhook', async (req, res) => {
   try {
@@ -298,15 +259,24 @@ app.post('/webhook', async (req, res) => {
     if (!phone) return res.sendStatus(200);
 
     if (buttonId) {
+
+      // 🔥 NOVO: BOTÃO 1 DINÂMICO
       if (buttonId === '1') {
-        await sendButtonList(
+        const usedTemplate = await sendTemplateFlow(
           phone,
-          'Perfeito. Para eu seguir com a análise, me confirma uma informação:\n\nVocê está trabalhando atualmente de carteira assinada?',
-          [
-            { id: '11', label: 'Sim, estou trabalhando' },
-            { id: '12', label: 'Não estou trabalhando' },
-          ]
+          'resposta_button_1'
         );
+
+        if (!usedTemplate) {
+          await sendButtonList(
+            phone,
+            'Perfeito. Para eu seguir com a análise, me confirma uma informação:\n\nVocê está trabalhando atualmente de carteira assinada?',
+            [
+              { id: '11', label: 'Sim, estou trabalhando' },
+              { id: '12', label: 'Não estou trabalhando' },
+            ]
+          );
+        }
       }
 
       if (buttonId === '2') {
@@ -363,7 +333,7 @@ app.post('/webhook', async (req, res) => {
 
     return res.sendStatus(200);
   } catch (error) {
-    console.error('Erro em /webhook:', error.response?.data || error.message);
+    console.error(error);
     return res.sendStatus(500);
   }
 });
