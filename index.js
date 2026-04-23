@@ -107,7 +107,6 @@ function mapButtonsForZApi(buttons = []) {
   }));
 }
 
-// 🔥 NOVA FUNÇÃO PARA WEBHOOK
 async function sendTemplateFlow(phone, templateKey) {
   const template = await getTemplateByKey(templateKey);
 
@@ -259,8 +258,6 @@ app.post('/webhook', async (req, res) => {
     if (!phone) return res.sendStatus(200);
 
     if (buttonId) {
-
-      // 🔥 NOVO: BOTÃO 1 DINÂMICO
       if (buttonId === '1') {
         const usedTemplate = await sendTemplateFlow(
           phone,
@@ -287,15 +284,22 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (buttonId === '11') {
-        await sendButtonList(
+        const usedTemplate = await sendTemplateFlow(
           phone,
-          'A quanto tempo você está trabalhando na empresa atual?',
-          [
-            { id: '111', label: 'Menos de 03 meses' },
-            { id: '112', label: 'De 03 meses a 01 ano' },
-            { id: '113', label: 'Acima de 01 ano' },
-          ]
+          'resposta_button_11'
         );
+
+        if (!usedTemplate) {
+          await sendButtonList(
+            phone,
+            'A quanto tempo você está trabalhando na empresa atual?',
+            [
+              { id: '111', label: 'Menos de 03 meses' },
+              { id: '112', label: 'De 03 meses a 01 ano' },
+              { id: '113', label: 'Acima de 01 ano' },
+            ]
+          );
+        }
       }
 
       if (buttonId === '12') {
