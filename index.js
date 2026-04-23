@@ -36,6 +36,12 @@ function getSupabaseHeaders() {
   };
 }
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value || '')
+  );
+}
+
 async function getTemplateByKey(key) {
   try {
     console.log('🔍 Buscando template:', key);
@@ -140,6 +146,11 @@ async function sendButtonList(phone, message, buttons) {
 // UPDATE LEAD
 // ========================
 async function updateLeadMessageInfo(leadId, messageText) {
+  if (!isUuid(leadId)) {
+    console.log('ℹ️ leadId não é UUID real. Pulando update em leads:', leadId);
+    return null;
+  }
+
   const now = new Date().toISOString();
 
   await axios.patch(
@@ -213,8 +224,11 @@ app.post('/send-indication-message', async (req, res) => {
       templateSource: 'supabase',
     });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ success: false });
+    console.error('❌ ERRO EM /send-indication-message:', error.response?.data || error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Erro interno no envio',
+    });
   }
 });
 
