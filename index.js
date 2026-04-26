@@ -37,9 +37,13 @@ function getSupabaseHeaders() {
 }
 
 function isUuid(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(
     String(value || '')
   );
+}
+
+function normalizePhone(phone) {
+  return String(phone || '').replace(/\D/g, '');
 }
 
 async function getTemplateByKey(key) {
@@ -88,27 +92,6 @@ function mapButtonsForZApi(buttons = []) {
   }));
 }
 
-async function sendTemplateFlow(phone, templateKey) {
-  const template = await getTemplateByKey(templateKey);
-
-  if (template) {
-    const message = renderTemplate(template.message_text, {});
-    const buttons = mapButtonsForZApi(template.buttons || []);
-
-    if (buttons.length > 0) {
-      await sendButtonList(phone, message, buttons);
-    } else {
-      await sendText(phone, message);
-    }
-
-    console.log('✅ Fluxo via template:', templateKey);
-    return true;
-  }
-
-  console.log('⚠️ Fluxo fallback:', templateKey);
-  return false;
-}
-
 // ========================
 // Z-API
 // ========================
@@ -140,6 +123,60 @@ async function sendButtonList(phone, message, buttons) {
       },
     }
   );
+}
+
+async function sendTemplateFlow(phone, templateKey) {
+  const template = await getTemplateByKey(templateKey);
+
+  if (template) {
+    const message = renderTemplate(template.message_text, {});
+    const buttons = mapButtonsForZApi(template.buttons || []);
+
+    if (buttons.length > 0) {
+      await sendButtonList(phone, message, buttons);
+    } else {
+      await sendText(phone, message);
+    }
+
+    console.log('✅ Fluxo via template:', templateKey);
+    return true;
+  }
+
+  console.log('⚠️ Fluxo fallback:', templateKey);
+  return false;
+}
+
+async function sendTemplateMessage({ leadId, phone, templateKey, nome, empresa }) {
+  if (!leadId || !phone || !templateKey) {
+    throw new Error('Campos obrigatórios faltando');
+  }
+
+  const template = await getTemplateByKey(templateKey);
+
+  if (!template) {
+    throw new Error('Template não encontrado');
+  }
+
+  const message = renderTemplate(template.message_text, {
+    nome,
+    empresa,
+  });
+
+  const buttons = mapButtonsForZApi(template.buttons || []);
+
+  if (buttons.length > 0) {
+    await sendButtonList(phone, message, buttons);
+  } else {
+    await sendText(phone, message);
+  }
+
+  await updateLeadMessageInfo(leadId, message);
+
+  return {
+    success: true,
+    message,
+    templateSource: 'supabase',
+  };
 }
 
 // ========================
@@ -188,46 +225,188 @@ app.post('/send-indication-message', async (req, res) => {
 
     const { leadId, phone, templateKey, nome, empresa } = req.body;
 
-    if (!leadId || !phone || !templateKey) {
-      return res.status(400).json({
-        success: false,
-        error: 'Campos obrigatórios faltando',
-      });
-    }
-
-    const template = await getTemplateByKey(templateKey);
-
-    if (!template) {
-      return res.status(400).json({
-        success: false,
-        error: 'Template não encontrado',
-      });
-    }
-
-    const message = renderTemplate(template.message_text, {
+    const result = await sendTemplateMessage({
+      leadId,
+      phone: normalizePhone(phone),
+      templateKey,
       nome,
       empresa,
     });
 
-    const buttons = mapButtonsForZApi(template.buttons || []);
-
-    if (buttons.length > 0) {
-      await sendButtonList(phone, message, buttons);
-    } else {
-      await sendText(phone, message);
-    }
-
-    await updateLeadMessageInfo(leadId, message);
-
-    return res.json({
-      success: true,
-      templateSource: 'supabase',
-    });
+    return res.json(result);
   } catch (error) {
     console.error('❌ ERRO EM /send-indication-message:', error.response?.data || error.message);
+
+    const statusCode = error.message === 'Template não encontrado' ? 400 : 500;
+
+    return res.status(statusCode).json({
+      success: false,
+      error: error.message || 'Erro interno no envio',
+    });
+  }
+});
+
+// ========================
+// FOLLOW-UP AUTOMÁTICO
+// ========================
+async function processFollowups() {
+  console.log('🚀 Rodando follow-ups automáticos...');
+
+  const result = {
+    success: true,
+    checkedRules: 0,
+    checkedLeads: 0,
+    sent: 0,
+    skipped: 0,
+    errors: [],
+  };
+
+  const rulesResponse = await axios.get(
+    `${SUPABASE_URL}/rest/v1/funnel_followup_rules?is_active=eq.true&select=*`,
+    { headers: getSupabaseHeaders() }
+  );
+
+  const rules = Array.isArray(rulesResponse.data) ? rulesResponse.data : [];
+  result.checkedRules = rules.length;
+
+  for (const rule of rules) {
+    const stage = rule.stage;
+    const templateKey = rule.template_key;
+    const delayMinutes = Number(rule.delay_minutes || 60);
+    const userId = rule.user_id;
+
+    if (!stage || !templateKey || !userId) {
+      result.skipped += 1;
+      continue;
+    }
+
+    const leadsResponse = await axios.get(
+      `${SUPABASE_URL}/rest/v1/leads?user_id=eq.${encodeURIComponent(
+        userId
+      )}&etapa=eq.${encodeURIComponent(stage)}&select=*`,
+      { headers: getSupabaseHeaders() }
+    );
+
+    const leads = Array.isArray(leadsResponse.data) ? leadsResponse.data : [];
+    result.checkedLeads += leads.length;
+
+    for (const lead of leads) {
+      try {
+        const phone = normalizePhone(lead.telefone);
+
+        if (!phone) {
+          result.skipped += 1;
+          continue;
+        }
+
+        const lastMessageDate = lead.last_message_sent_at
+          ? new Date(lead.last_message_sent_at)
+          : null;
+
+        if (lastMessageDate) {
+          const diffMinutes = (Date.now() - lastMessageDate.getTime()) / 60000;
+
+          if (diffMinutes < delayMinutes) {
+            result.skipped += 1;
+            continue;
+          }
+        }
+
+        const sentResult = await sendTemplateMessage({
+          leadId: lead.id,
+          phone,
+          templateKey,
+          nome: lead.nome,
+          empresa: lead.empresa,
+        });
+
+        await axios.post(
+          `${SUPABASE_URL}/rest/v1/funnel_automation_logs`,
+          {
+            user_id: userId,
+            lead_id: lead.id,
+            from_stage: stage,
+            to_stage: stage,
+            phone,
+            lead_name: lead.nome,
+            message_text: sentResult.message,
+            status: 'followup_sent',
+            error_message: null,
+          },
+          { headers: getSupabaseHeaders() }
+        );
+
+        result.sent += 1;
+      } catch (error) {
+        const errorMessage = error.response?.data || error.message || 'Erro desconhecido';
+
+        result.errors.push({
+          lead_id: lead.id,
+          lead_name: lead.nome,
+          error: errorMessage,
+        });
+
+        await axios.post(
+          `${SUPABASE_URL}/rest/v1/funnel_automation_logs`,
+          {
+            user_id: userId,
+            lead_id: lead.id,
+            from_stage: stage,
+            to_stage: stage,
+            phone: normalizePhone(lead.telefone),
+            lead_name: lead.nome,
+            message_text: null,
+            status: 'followup_error',
+            error_message:
+              typeof errorMessage === 'string' ? errorMessage : JSON.stringify(errorMessage),
+          },
+          { headers: getSupabaseHeaders() }
+        );
+      }
+    }
+  }
+
+  return result;
+}
+
+app.post('/run-followups', async (req, res) => {
+  try {
+    if (BACKEND_API_KEY) {
+      const apiKey = req.headers['x-api-key'];
+      if (apiKey !== BACKEND_API_KEY) {
+        return res.status(401).json({ success: false });
+      }
+    }
+
+    const result = await processFollowups();
+    return res.json(result);
+  } catch (error) {
+    console.error('❌ ERRO FOLLOW-UP:', error.response?.data || error.message);
+
     return res.status(500).json({
       success: false,
-      error: 'Erro interno no envio',
+      error: error.message || 'Erro interno no follow-up',
+    });
+  }
+});
+
+app.get('/run-followups', async (req, res) => {
+  try {
+    if (BACKEND_API_KEY) {
+      const apiKey = req.headers['x-api-key'];
+      if (apiKey !== BACKEND_API_KEY) {
+        return res.status(401).json({ success: false });
+      }
+    }
+
+    const result = await processFollowups();
+    return res.json(result);
+  } catch (error) {
+    console.error('❌ ERRO FOLLOW-UP:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Erro interno no follow-up',
     });
   }
 });
@@ -336,72 +515,7 @@ app.post('/webhook', async (req, res) => {
     return res.sendStatus(500);
   }
 });
-// ========================
-// FOLLOW-UP AUTOMÁTICO
-// ========================
-app.post('/run-followups', async (req, res) => {
-  try {
-    console.log('🚀 Rodando follow-ups...');
 
-    // 1. Buscar regras ativas
-    const rulesRes = await axios.get(
-      `${SUPABASE_URL}/rest/v1/funnel_followup_rules?is_active=eq.true`,
-      { headers: getSupabaseHeaders() }
-    );
-
-    const rules = rulesRes.data || [];
-
-    for (const rule of rules) {
-      const { stage, template_key, delay_minutes, user_id } = rule;
-
-      // 2. Buscar leads na etapa
-      const leadsRes = await axios.get(
-        `${SUPABASE_URL}/rest/v1/leads?etapa=eq.${encodeURIComponent(stage)}&user_id=eq.${user_id}`,
-        { headers: getSupabaseHeaders() }
-      );
-
-      const leads = leadsRes.data || [];
-
-      for (const lead of leads) {
-        if (!lead.telefone) continue;
-
-        const lastMessage = lead.last_message_sent_at
-          ? new Date(lead.last_message_sent_at)
-          : null;
-
-        const now = new Date();
-
-        // 3. Verifica tempo
-        if (lastMessage) {
-          const diffMinutes = (now - lastMessage) / 60000;
-
-          if (diffMinutes < delay_minutes) {
-            continue;
-          }
-        }
-
-        console.log('📤 Enviando follow-up para:', lead.nome);
-
-        // 4. Dispara
-        await axios.post(
-          `http://localhost:${PORT}/send-indication-message`,
-          {
-            leadId: lead.id,
-            phone: lead.telefone,
-            templateKey: template_key,
-            nome: lead.nome,
-            empresa: lead.empresa,
-          }
-        );
-      }
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('❌ ERRO FOLLOW-UP:', error.message);
-    res.status(500).json({ success: false });
-  }
-});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Rodando na porta ${PORT}`);
