@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA DE ATENDIMENTO');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA DE ATENDIMENTO PARA LEAD QUENTE');
 
 const express = require('express');
 const axios = require('axios');
@@ -32,7 +32,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
 
@@ -57,6 +57,16 @@ function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(
     String(value || '')
   );
+}
+
+function isHotLead(lead) {
+  if (!lead) return false;
+
+  const etapa = String(lead.etapa || '').trim().toLowerCase();
+
+  const allowedStages = ['em atendimento', 'em proposta'];
+
+  return allowedStages.includes(etapa);
 }
 
 function renderTemplate(templateText, variables = {}) {
@@ -433,7 +443,6 @@ async function generateAiReply({ lead, latestMessage }) {
   }
 
   const messages = await getLeadMessages(lead.id, 12);
-
   const historyText = formatMessagesForPrompt(messages);
 
   const input = `
@@ -554,6 +563,16 @@ app.post('/generate-reply', async (req, res) => {
       });
     }
 
+    if (!isHotLead(lead)) {
+      return res.status(200).json({
+        success: false,
+        blocked: true,
+        reason: 'Lead não está em etapa qualificada para IA',
+        currentStage: lead.etapa || null,
+        allowedStages: ['Em atendimento', 'Em proposta'],
+      });
+    }
+
     const suggestion = await generateAiReply({
       lead,
       latestMessage,
@@ -562,6 +581,7 @@ app.post('/generate-reply', async (req, res) => {
     return res.json({
       success: true,
       leadId: lead.id,
+      stage: lead.etapa || null,
       suggestion,
     });
   } catch (error) {
