@@ -1,3 +1,4 @@
+console.log('🔥 VERSAO NOVA DO BACKEND RODANDO');
 const express = require('express');
 const axios = require('axios');
 
