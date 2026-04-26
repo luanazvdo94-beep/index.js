@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND COM CONTROLE DE RESPOSTA ATIVO');
+console.log('🔥 BACKEND COM SEQUÊNCIA INTELIGENTE ATIVO');
 
 const express = require('express');
 const axios = require('axios');
@@ -103,14 +103,14 @@ async function log(data) {
 }
 
 // ========================
-// FOLLOW-UP
+// SEQUÊNCIA INTELIGENTE
 // ========================
 async function runFollowups() {
-  console.log('🚀 Follow-up rodando...');
+  console.log('🚀 Sequência inteligente rodando...');
 
-  const rules = (
+  const steps = (
     await axios.get(
-      `${SUPABASE_URL}/rest/v1/funnel_followup_rules?is_active=eq.true`,
+      `${SUPABASE_URL}/rest/v1/funnel_followup_sequence_steps?is_active=eq.true&order=step_number.asc`,
       { headers: getHeaders() }
     )
   ).data;
@@ -121,24 +121,24 @@ async function runFollowups() {
     skipped: 0,
   };
 
-  for (const rule of rules) {
+  for (const step of steps) {
     const leads = (
       await axios.get(
-        `${SUPABASE_URL}/rest/v1/leads?etapa=eq.${rule.stage}&user_id=eq.${rule.user_id}`,
+        `${SUPABASE_URL}/rest/v1/leads?etapa=eq.${step.stage}&user_id=eq.${step.user_id}`,
         { headers: getHeaders() }
       )
     ).data;
 
     for (const lead of leads) {
-      // 🔴 BLOQUEIO POR RESPOSTA
+      // 🔴 CLIENTE RESPONDEU → PARA TUDO
       if (lead.last_client_interaction_at) {
         result.skipped++;
 
         await log({
-          user_id: rule.user_id,
+          user_id: step.user_id,
           lead_id: lead.id,
-          from_stage: rule.stage,
-          to_stage: rule.stage,
+          from_stage: step.stage,
+          to_stage: step.stage,
           status: 'blocked_by_response',
           error_message: 'Cliente respondeu',
         });
@@ -146,30 +146,44 @@ async function runFollowups() {
         continue;
       }
 
-      // LIMITE
+      // 🔍 VERIFICAR QUAL STEP JÁ FOI ENVIADO
       const logs = (
         await axios.get(
-          `${SUPABASE_URL}/rest/v1/funnel_automation_logs?lead_id=eq.${lead.id}&status=eq.followup_sent`,
+          `${SUPABASE_URL}/rest/v1/funnel_automation_logs?lead_id=eq.${lead.id}&status=eq.followup_sent&order=created_at.desc`,
           { headers: getHeaders() }
         )
       ).data;
 
-      if (logs.length >= rule.max_sends_per_lead) {
+      const lastLog = logs[0];
+
+      // Se já enviou esse step → pula
+      if (logs.length >= step.step_number) {
         result.skipped++;
         continue;
       }
 
-      // ENVIO
+      // ⏱ DELAY
+      if (lastLog) {
+        const diff =
+          (Date.now() - new Date(lastLog.created_at).getTime()) / 60000;
+
+        if (diff < step.delay_minutes) {
+          result.skipped++;
+          continue;
+        }
+      }
+
+      // 🚀 ENVIO
       const msg = await sendTemplate({
         lead,
-        templateKey: rule.template_key,
+        templateKey: step.template_key,
       });
 
       await log({
-        user_id: rule.user_id,
+        user_id: step.user_id,
         lead_id: lead.id,
-        from_stage: rule.stage,
-        to_stage: rule.stage,
+        from_stage: step.stage,
+        to_stage: step.stage,
         status: 'followup_sent',
         message_text: msg,
       });
@@ -197,7 +211,7 @@ app.get('/run-followups', async (req, res) => {
 });
 
 // ========================
-// WEBHOOK (AQUI ESTÁ O SEGREDO)
+// WEBHOOK
 // ========================
 app.post('/webhook', async (req, res) => {
   try {
@@ -213,7 +227,7 @@ app.post('/webhook', async (req, res) => {
       { headers: getHeaders() }
     );
 
-    console.log('📩 Cliente respondeu → bloqueado follow-up');
+    console.log('📩 Cliente respondeu → bloqueado');
 
     res.sendStatus(200);
   } catch (e) {
