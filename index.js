@@ -336,7 +336,72 @@ app.post('/webhook', async (req, res) => {
     return res.sendStatus(500);
   }
 });
+// ========================
+// FOLLOW-UP AUTOMÁTICO
+// ========================
+app.post('/run-followups', async (req, res) => {
+  try {
+    console.log('🚀 Rodando follow-ups...');
 
+    // 1. Buscar regras ativas
+    const rulesRes = await axios.get(
+      `${SUPABASE_URL}/rest/v1/funnel_followup_rules?is_active=eq.true`,
+      { headers: getSupabaseHeaders() }
+    );
+
+    const rules = rulesRes.data || [];
+
+    for (const rule of rules) {
+      const { stage, template_key, delay_minutes, user_id } = rule;
+
+      // 2. Buscar leads na etapa
+      const leadsRes = await axios.get(
+        `${SUPABASE_URL}/rest/v1/leads?etapa=eq.${encodeURIComponent(stage)}&user_id=eq.${user_id}`,
+        { headers: getSupabaseHeaders() }
+      );
+
+      const leads = leadsRes.data || [];
+
+      for (const lead of leads) {
+        if (!lead.telefone) continue;
+
+        const lastMessage = lead.last_message_sent_at
+          ? new Date(lead.last_message_sent_at)
+          : null;
+
+        const now = new Date();
+
+        // 3. Verifica tempo
+        if (lastMessage) {
+          const diffMinutes = (now - lastMessage) / 60000;
+
+          if (diffMinutes < delay_minutes) {
+            continue;
+          }
+        }
+
+        console.log('📤 Enviando follow-up para:', lead.nome);
+
+        // 4. Dispara
+        await axios.post(
+          `http://localhost:${PORT}/send-indication-message`,
+          {
+            leadId: lead.id,
+            phone: lead.telefone,
+            templateKey: template_key,
+            nome: lead.nome,
+            empresa: lead.empresa,
+          }
+        );
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ ERRO FOLLOW-UP:', error.message);
+    res.status(500).json({ success: false });
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Rodando na porta ${PORT}`);
