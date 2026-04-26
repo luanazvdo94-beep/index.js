@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND COM SEQUÊNCIA INTELIGENTE ATIVO');
+console.log('🔥 BACKEND COM IA BASE (HISTÓRICO ATIVO)');
 
 const express = require('express');
 const axios = require('axios');
@@ -59,14 +59,41 @@ function render(text, vars = {}) {
 }
 
 // ========================
+// HISTÓRICO (NOVO)
+// ========================
+async function saveMessage({ leadId, direction, message }) {
+  try {
+    await axios.post(
+      `${SUPABASE_URL}/rest/v1/lead_messages`,
+      {
+        lead_id: leadId,
+        direction,
+        message_text: message,
+      },
+      { headers: getHeaders() }
+    );
+  } catch (e) {
+    console.log('Erro ao salvar mensagem:', e.message);
+  }
+}
+
+// ========================
 // ENVIO
 // ========================
-async function sendText(phone, message) {
+async function sendText(phone, message, leadId = null) {
   await axios.post(
     `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`,
     { phone, message },
     { headers: { 'Client-Token': ZAPI_CLIENT_TOKEN } }
   );
+
+  if (leadId) {
+    await saveMessage({
+      leadId,
+      direction: 'out',
+      message,
+    });
+  }
 }
 
 async function sendTemplate({ lead, templateKey }) {
@@ -78,7 +105,7 @@ async function sendTemplate({ lead, templateKey }) {
     empresa: lead.empresa,
   });
 
-  await sendText(lead.telefone, msg);
+  await sendText(lead.telefone, msg, lead.id);
 
   await axios.patch(
     `${SUPABASE_URL}/rest/v1/leads?id=eq.${lead.id}`,
@@ -130,7 +157,6 @@ async function runFollowups() {
     ).data;
 
     for (const lead of leads) {
-      // 🔴 CLIENTE RESPONDEU → PARA TUDO
       if (lead.last_client_interaction_at) {
         result.skipped++;
 
@@ -140,13 +166,11 @@ async function runFollowups() {
           from_stage: step.stage,
           to_stage: step.stage,
           status: 'blocked_by_response',
-          error_message: 'Cliente respondeu',
         });
 
         continue;
       }
 
-      // 🔍 VERIFICAR QUAL STEP JÁ FOI ENVIADO
       const logs = (
         await axios.get(
           `${SUPABASE_URL}/rest/v1/funnel_automation_logs?lead_id=eq.${lead.id}&status=eq.followup_sent&order=created_at.desc`,
@@ -154,15 +178,13 @@ async function runFollowups() {
         )
       ).data;
 
-      const lastLog = logs[0];
-
-      // Se já enviou esse step → pula
       if (logs.length >= step.step_number) {
         result.skipped++;
         continue;
       }
 
-      // ⏱ DELAY
+      const lastLog = logs[0];
+
       if (lastLog) {
         const diff =
           (Date.now() - new Date(lastLog.created_at).getTime()) / 60000;
@@ -173,7 +195,6 @@ async function runFollowups() {
         }
       }
 
-      // 🚀 ENVIO
       const msg = await sendTemplate({
         lead,
         templateKey: step.template_key,
@@ -211,23 +232,43 @@ app.get('/run-followups', async (req, res) => {
 });
 
 // ========================
-// WEBHOOK
+// WEBHOOK (SALVA ENTRADA)
 // ========================
 app.post('/webhook', async (req, res) => {
   try {
     const phone = normalizePhone(req.body.phone);
+    const text =
+      req.body.text?.message ||
+      req.body.message ||
+      req.body.body ||
+      '';
 
     if (!phone) return res.sendStatus(200);
 
-    await axios.patch(
-      `${SUPABASE_URL}/rest/v1/leads?telefone=eq.${phone}`,
-      {
-        last_client_interaction_at: new Date().toISOString(),
-      },
+    const leadRes = await axios.get(
+      `${SUPABASE_URL}/rest/v1/leads?telefone=eq.${phone}&select=id`,
       { headers: getHeaders() }
     );
 
-    console.log('📩 Cliente respondeu → bloqueado');
+    const lead = leadRes.data?.[0];
+
+    if (lead) {
+      await saveMessage({
+        leadId: lead.id,
+        direction: 'in',
+        message: text,
+      });
+
+      await axios.patch(
+        `${SUPABASE_URL}/rest/v1/leads?id=eq.${lead.id}`,
+        {
+          last_client_interaction_at: new Date().toISOString(),
+        },
+        { headers: getHeaders() }
+      );
+    }
+
+    console.log('📩 Cliente respondeu → histórico salvo');
 
     res.sendStatus(200);
   } catch (e) {
