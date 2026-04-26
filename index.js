@@ -1,4 +1,5 @@
-console.log('🔥 VERSAO NOVA DO BACKEND RODANDO');
+console.log('🔥 VERSAO NOVA DO BACKEND RODANDO - FOLLOWUP LIMITADO');
+
 const express = require('express');
 const axios = require('axios');
 
@@ -91,6 +92,56 @@ function mapButtonsForZApi(buttons = []) {
     id: String(b.id),
     label: String(b.text),
   }));
+}
+
+async function createAutomationLog({
+  userId,
+  leadId,
+  fromStage,
+  toStage,
+  phone,
+  leadName,
+  messageText,
+  status,
+  errorMessage,
+}) {
+  try {
+    await axios.post(
+      `${SUPABASE_URL}/rest/v1/funnel_automation_logs`,
+      {
+        user_id: userId,
+        lead_id: leadId,
+        from_stage: fromStage,
+        to_stage: toStage,
+        phone,
+        lead_name: leadName,
+        message_text: messageText || null,
+        status,
+        error_message: errorMessage || null,
+      },
+      { headers: getSupabaseHeaders() }
+    );
+  } catch (error) {
+    console.error('❌ ERRO AO CRIAR LOG:', error.response?.data || error.message);
+  }
+}
+
+async function getFollowupSentLogs({ leadId, stage, templateKey }) {
+  const response = await axios.get(
+    `${SUPABASE_URL}/rest/v1/funnel_automation_logs?lead_id=eq.${encodeURIComponent(
+      leadId
+    )}&from_stage=eq.${encodeURIComponent(stage)}&to_stage=eq.${encodeURIComponent(
+      stage
+    )}&status=eq.followup_sent&select=id,created_at,message_text&order=created_at.desc`,
+    { headers: getSupabaseHeaders() }
+  );
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+
+  return rows.filter((row) => {
+    if (!templateKey) return true;
+    return String(row.message_text || '').length > 0;
+  });
 }
 
 // ========================
@@ -248,10 +299,10 @@ app.post('/send-indication-message', async (req, res) => {
 });
 
 // ========================
-// FOLLOW-UP AUTOMÁTICO
+// FOLLOW-UP AUTOMÁTICO COM LIMITE
 // ========================
 async function processFollowups() {
-  console.log('🚀 Rodando follow-ups automáticos...');
+  console.log('🚀 Rodando follow-ups automáticos com limite...');
 
   const result = {
     success: true,
@@ -259,6 +310,8 @@ async function processFollowups() {
     checkedLeads: 0,
     sent: 0,
     skipped: 0,
+    skippedByLimit: 0,
+    skippedByInterval: 0,
     errors: [],
   };
 
@@ -275,6 +328,8 @@ async function processFollowups() {
     const templateKey = rule.template_key;
     const delayMinutes = Number(rule.delay_minutes || 60);
     const userId = rule.user_id;
+    const maxSendsPerLead = Number(rule.max_sends_per_lead || 1);
+    const minMinutesBetweenSends = Number(rule.min_minutes_between_sends || 1440);
 
     if (!stage || !templateKey || !userId) {
       result.skipped += 1;
@@ -292,11 +347,24 @@ async function processFollowups() {
     result.checkedLeads += leads.length;
 
     for (const lead of leads) {
-      try {
-        const phone = normalizePhone(lead.telefone);
+      const phone = normalizePhone(lead.telefone);
 
+      try {
         if (!phone) {
           result.skipped += 1;
+
+          await createAutomationLog({
+            userId,
+            leadId: lead.id,
+            fromStage: stage,
+            toStage: stage,
+            phone,
+            leadName: lead.nome,
+            messageText: null,
+            status: 'followup_skipped_no_phone',
+            errorMessage: 'Lead sem telefone válido.',
+          });
+
           continue;
         }
 
@@ -309,6 +377,73 @@ async function processFollowups() {
 
           if (diffMinutes < delayMinutes) {
             result.skipped += 1;
+            result.skippedByInterval += 1;
+
+            await createAutomationLog({
+              userId,
+              leadId: lead.id,
+              fromStage: stage,
+              toStage: stage,
+              phone,
+              leadName: lead.nome,
+              messageText: null,
+              status: 'followup_skipped_interval',
+              errorMessage: `Aguardando delay inicial. Diferença: ${Math.floor(
+                diffMinutes
+              )} min. Necessário: ${delayMinutes} min.`,
+            });
+
+            continue;
+          }
+        }
+
+        const sentLogs = await getFollowupSentLogs({
+          leadId: lead.id,
+          stage,
+          templateKey,
+        });
+
+        if (sentLogs.length >= maxSendsPerLead) {
+          result.skipped += 1;
+          result.skippedByLimit += 1;
+
+          await createAutomationLog({
+            userId,
+            leadId: lead.id,
+            fromStage: stage,
+            toStage: stage,
+            phone,
+            leadName: lead.nome,
+            messageText: null,
+            status: 'followup_skipped_limit',
+            errorMessage: `Limite atingido. Enviados: ${sentLogs.length}. Máximo permitido: ${maxSendsPerLead}.`,
+          });
+
+          continue;
+        }
+
+        if (sentLogs.length > 0) {
+          const lastFollowupDate = new Date(sentLogs[0].created_at);
+          const diffSinceLastFollowup = (Date.now() - lastFollowupDate.getTime()) / 60000;
+
+          if (diffSinceLastFollowup < minMinutesBetweenSends) {
+            result.skipped += 1;
+            result.skippedByInterval += 1;
+
+            await createAutomationLog({
+              userId,
+              leadId: lead.id,
+              fromStage: stage,
+              toStage: stage,
+              phone,
+              leadName: lead.nome,
+              messageText: null,
+              status: 'followup_skipped_min_interval',
+              errorMessage: `Intervalo mínimo entre follow-ups não cumprido. Diferença: ${Math.floor(
+                diffSinceLastFollowup
+              )} min. Necessário: ${minMinutesBetweenSends} min.`,
+            });
+
             continue;
           }
         }
@@ -321,21 +456,17 @@ async function processFollowups() {
           empresa: lead.empresa,
         });
 
-        await axios.post(
-          `${SUPABASE_URL}/rest/v1/funnel_automation_logs`,
-          {
-            user_id: userId,
-            lead_id: lead.id,
-            from_stage: stage,
-            to_stage: stage,
-            phone,
-            lead_name: lead.nome,
-            message_text: sentResult.message,
-            status: 'followup_sent',
-            error_message: null,
-          },
-          { headers: getSupabaseHeaders() }
-        );
+        await createAutomationLog({
+          userId,
+          leadId: lead.id,
+          fromStage: stage,
+          toStage: stage,
+          phone,
+          leadName: lead.nome,
+          messageText: sentResult.message,
+          status: 'followup_sent',
+          errorMessage: null,
+        });
 
         result.sent += 1;
       } catch (error) {
@@ -347,22 +478,17 @@ async function processFollowups() {
           error: errorMessage,
         });
 
-        await axios.post(
-          `${SUPABASE_URL}/rest/v1/funnel_automation_logs`,
-          {
-            user_id: userId,
-            lead_id: lead.id,
-            from_stage: stage,
-            to_stage: stage,
-            phone: normalizePhone(lead.telefone),
-            lead_name: lead.nome,
-            message_text: null,
-            status: 'followup_error',
-            error_message:
-              typeof errorMessage === 'string' ? errorMessage : JSON.stringify(errorMessage),
-          },
-          { headers: getSupabaseHeaders() }
-        );
+        await createAutomationLog({
+          userId,
+          leadId: lead.id,
+          fromStage: stage,
+          toStage: stage,
+          phone,
+          leadName: lead.nome,
+          messageText: null,
+          status: 'followup_error',
+          errorMessage: typeof errorMessage === 'string' ? errorMessage : JSON.stringify(errorMessage),
+        });
       }
     }
   }
