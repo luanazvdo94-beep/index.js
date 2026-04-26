@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL: DISPARO + FUNIL + FOLLOWUP + HISTÓRICO IA');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA DE ATENDIMENTO');
 
 const express = require('express');
 const axios = require('axios');
@@ -30,6 +30,9 @@ const ZAPI_CLIENT_TOKEN = process.env.ZAPI_CLIENT_TOKEN;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.5';
 
 const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
 
@@ -122,6 +125,33 @@ async function getLeadByPhone(phone) {
 
   const rows = Array.isArray(response.data) ? response.data : [];
   return rows[0] || null;
+}
+
+async function getLeadById(leadId) {
+  if (!leadId) return null;
+
+  const response = await axios.get(
+    `${SUPABASE_URL}/rest/v1/leads?id=eq.${encodeURIComponent(leadId)}&select=*`,
+    { headers: getSupabaseHeaders() }
+  );
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return rows[0] || null;
+}
+
+async function getLeadMessages(leadId, limit = 12) {
+  if (!leadId) return [];
+
+  const response = await axios.get(
+    `${SUPABASE_URL}/rest/v1/lead_messages?lead_id=eq.${encodeURIComponent(
+      leadId
+    )}&select=direction,message_text,created_at&order=created_at.desc&limit=${limit}`,
+    { headers: getSupabaseHeaders() }
+  );
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+
+  return rows.reverse();
 }
 
 async function saveLeadMessage({ leadId, direction, messageText }) {
@@ -353,6 +383,108 @@ async function sendTemplateFlow(phone, templateKey) {
 }
 
 // ========================
+// IA - GERAÇÃO DE RESPOSTA
+// ========================
+function buildAiInstructions() {
+  return `
+Você é um assistente interno da NumON Promotora para sugerir respostas de WhatsApp.
+
+Função:
+- Gerar SOMENTE uma sugestão de resposta para o atendente humano copiar/enviar.
+- Não envie mensagem automaticamente.
+- Não finja que consultou sistemas que não foram informados.
+- Não invente valor aprovado, taxa, banco, prazo, parcela ou status de proposta.
+- Nunca prometa aprovação.
+- Nunca use linguagem robótica.
+- Seja natural, curto, comercial e confiável.
+- Responda como um consultor de crédito experiente no Brasil.
+- Sempre conduza para a próxima ação objetiva.
+
+Regras de qualidade:
+- Máximo de 3 parágrafos curtos.
+- Evite "Prezado", "agradecemos o contato", "estamos à disposição" de forma genérica.
+- Use o nome do cliente se estiver disponível.
+- Se faltar informação, peça apenas uma confirmação objetiva.
+- Se o cliente estiver inseguro, reforce segurança e clareza.
+- Se o cliente perguntar taxa/valor/parcela e não houver dados no contexto, diga que vai conferir/simular antes de passar condição.
+- Se o cliente pedir cancelamento ou não tiver interesse, responda com respeito e deixe porta aberta.
+- Se houver risco jurídico/financeiro, seja conservador.
+
+A resposta deve conter apenas o texto sugerido para WhatsApp.
+`.trim();
+}
+
+function formatMessagesForPrompt(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return 'Sem histórico salvo.';
+  }
+
+  return messages
+    .map((message) => {
+      const who = message.direction === 'in' ? 'Cliente' : 'NumON';
+      return `${who}: ${message.message_text || ''}`;
+    })
+    .join('\n');
+}
+
+async function generateAiReply({ lead, latestMessage }) {
+  if (!OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY não configurada no Railway');
+  }
+
+  const messages = await getLeadMessages(lead.id, 12);
+
+  const historyText = formatMessagesForPrompt(messages);
+
+  const input = `
+DADOS DO LEAD:
+Nome: ${lead.nome || 'Não informado'}
+Telefone: ${lead.telefone || 'Não informado'}
+Empresa: ${lead.empresa || 'Não informada'}
+Produto: ${lead.produto || 'Não informado'}
+Etapa do funil: ${lead.etapa || 'Não informada'}
+Status: ${lead.status || 'Não informado'}
+Origem: ${lead.origem || 'Não informada'}
+Observações internas: ${lead.observacoes || 'Sem observações'}
+
+HISTÓRICO RECENTE:
+${historyText}
+
+ÚLTIMA MENSAGEM DO CLIENTE:
+${latestMessage || 'Não informada'}
+
+TAREFA:
+Gere uma resposta de WhatsApp com contexto, sem inventar informação, conduzindo para a próxima ação.
+`.trim();
+
+  const response = await axios.post(
+    'https://api.openai.com/v1/responses',
+    {
+      model: OPENAI_MODEL,
+      instructions: buildAiInstructions(),
+      input,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  const suggestion =
+    response.data?.output_text ||
+    response.data?.output?.[0]?.content?.[0]?.text ||
+    '';
+
+  if (!suggestion) {
+    throw new Error('IA não retornou sugestão válida');
+  }
+
+  return suggestion.trim();
+}
+
+// ========================
 // HEALTH
 // ========================
 app.get('/', (req, res) => {
@@ -394,6 +526,50 @@ app.post('/send-indication-message', async (req, res) => {
     return res.status(statusCode).json({
       success: false,
       error: error.message || 'Erro interno no envio',
+    });
+  }
+});
+
+// ========================
+// IA - ENDPOINT DE SUGESTÃO
+// ========================
+app.post('/generate-reply', async (req, res) => {
+  try {
+    const { leadId, phone, latestMessage } = req.body;
+
+    let lead = null;
+
+    if (leadId) {
+      lead = await getLeadById(leadId);
+    }
+
+    if (!lead && phone) {
+      lead = await getLeadByPhone(phone);
+    }
+
+    if (!lead) {
+      return res.status(404).json({
+        success: false,
+        error: 'Lead não encontrado',
+      });
+    }
+
+    const suggestion = await generateAiReply({
+      lead,
+      latestMessage,
+    });
+
+    return res.json({
+      success: true,
+      leadId: lead.id,
+      suggestion,
+    });
+  } catch (error) {
+    console.error('❌ ERRO EM /generate-reply:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Erro interno ao gerar resposta IA',
     });
   }
 });
