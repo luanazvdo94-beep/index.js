@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA DE ATENDIMENTO PARA LEAD QUENTE + CONSULTA CNPJ + BUSCA EMPRESA');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT');
 
 const express = require('express');
 const axios = require('axios');
@@ -57,6 +57,10 @@ function cleanCNPJ(cnpj) {
   return String(cnpj || '').replace(/\D/g, '');
 }
 
+function cleanCPF(cpf) {
+  return String(cpf || '').replace(/\D/g, '');
+}
+
 function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(
     String(value || '')
@@ -103,6 +107,34 @@ function requireBackendApiKey(req, res) {
   }
 
   return true;
+}
+
+function parseNameCpfFromText(text) {
+  const raw = String(text || '').trim();
+  const cpfMatch = raw.match(/(\d{3}\.?\d{3}\.?\d{3}-?\d{2})/);
+  const cpf = cpfMatch ? cleanCPF(cpfMatch[1]) : '';
+
+  let name = raw;
+
+  if (cpfMatch) {
+    name = raw.replace(cpfMatch[1], '').trim();
+  }
+
+  name = name
+    .replace(/cpf/gi, '')
+    .replace(/nome/gi, '')
+    .replace(/[:\-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (name.length < 2) {
+    name = '';
+  }
+
+  return {
+    name,
+    cpf: cpf.length === 11 ? cpf : '',
+  };
 }
 
 // ========================
@@ -211,6 +243,29 @@ async function updateLeadMessageInfo(leadId, messageText) {
   return now;
 }
 
+async function updateLeadFields(leadId, fields) {
+  if (!isUuid(leadId)) {
+    console.log('ℹ️ leadId inválido para atualização:', leadId);
+    return null;
+  }
+
+  const safeFields = Object.fromEntries(
+    Object.entries(fields || {}).filter(([, value]) => value !== undefined)
+  );
+
+  if (Object.keys(safeFields).length === 0) {
+    return null;
+  }
+
+  await axios.patch(
+    `${SUPABASE_URL}/rest/v1/leads?id=eq.${leadId}`,
+    safeFields,
+    { headers: getSupabaseHeaders() }
+  );
+
+  return safeFields;
+}
+
 async function markClientInteractionByPhone(phone, messageText = '') {
   const normalizedPhone = normalizePhone(phone);
 
@@ -220,13 +275,9 @@ async function markClientInteractionByPhone(phone, messageText = '') {
 
   if (!lead) return null;
 
-  await axios.patch(
-    `${SUPABASE_URL}/rest/v1/leads?id=eq.${lead.id}`,
-    {
-      last_client_interaction_at: new Date().toISOString(),
-    },
-    { headers: getSupabaseHeaders() }
-  );
+  await updateLeadFields(lead.id, {
+    last_client_interaction_at: new Date().toISOString(),
+  });
 
   if (messageText) {
     await saveLeadMessage({
@@ -237,6 +288,128 @@ async function markClientInteractionByPhone(phone, messageText = '') {
   }
 
   return lead;
+}
+
+// ========================
+// SUPABASE - TRIAGEM CLT
+// ========================
+async function saveLeadTriageAnswer({
+  leadId,
+  phone,
+  questionKey,
+  questionText,
+  answerValue,
+  source = 'whatsapp',
+}) {
+  if (!questionKey || !answerValue) return null;
+
+  try {
+    const payload = {
+      lead_id: isUuid(leadId) ? leadId : null,
+      phone: normalizePhone(phone),
+      question_key: questionKey,
+      question_text: questionText || null,
+      answer_value: String(answerValue),
+      source,
+    };
+
+    await axios.post(
+      `${SUPABASE_URL}/rest/v1/lead_triage_answers`,
+      payload,
+      { headers: getSupabaseHeaders() }
+    );
+
+    return payload;
+  } catch (error) {
+    console.error('⚠️ Erro ao salvar lead_triage_answers:', error.response?.data || error.message);
+    return null;
+  }
+}
+
+async function saveTriageByPhone({
+  phone,
+  questionKey,
+  questionText,
+  answerValue,
+  leadPatch = {},
+}) {
+  const normalizedPhone = normalizePhone(phone);
+  const lead = await getLeadByPhone(normalizedPhone);
+
+  await saveLeadTriageAnswer({
+    leadId: lead?.id || null,
+    phone: normalizedPhone,
+    questionKey,
+    questionText,
+    answerValue,
+  });
+
+  if (lead?.id && Object.keys(leadPatch).length > 0) {
+    await updateLeadFields(lead.id, leadPatch);
+  }
+
+  return lead;
+}
+
+async function getLeadTriageAnswers(leadId) {
+  if (!isUuid(leadId)) return [];
+
+  const response = await axios.get(
+    `${SUPABASE_URL}/rest/v1/lead_triage_answers?lead_id=eq.${encodeURIComponent(
+      leadId
+    )}&select=*&order=created_at.asc`,
+    { headers: getSupabaseHeaders() }
+  );
+
+  return Array.isArray(response.data) ? response.data : [];
+}
+
+async function markLeadReadyForPresimulationByPhone(phone, messageText) {
+  const normalizedPhone = normalizePhone(phone);
+  const lead = await getLeadByPhone(normalizedPhone);
+
+  if (!lead) {
+    console.log('ℹ️ Lead não encontrado para marcar pré-simulação:', normalizedPhone);
+    return null;
+  }
+
+  const parsed = parseNameCpfFromText(messageText);
+
+  await saveLeadTriageAnswer({
+    leadId: lead.id,
+    phone: normalizedPhone,
+    questionKey: 'nome_cpf',
+    questionText: 'Informe nome e CPF para simulação',
+    answerValue: messageText,
+  });
+
+  const patch = {
+    clt_ready_for_presimulation: true,
+    clt_triage_completed_at: new Date().toISOString(),
+    etapa: 'Simulação',
+    status: 'Contato iniciado',
+  };
+
+  if (parsed.name) {
+    patch.nome = parsed.name;
+  }
+
+  if (parsed.cpf) {
+    patch.cpf = parsed.cpf;
+  }
+
+  await updateLeadFields(lead.id, patch);
+
+  console.log('✅ Lead pronto para pré-simulação:', {
+    leadId: lead.id,
+    phone: normalizedPhone,
+    parsed,
+  });
+
+  return {
+    lead,
+    parsed,
+  };
 }
 
 // ========================
@@ -685,6 +858,50 @@ app.get('/search-company', async (req, res) => {
 });
 
 // ========================
+// DADOS ROBUSTOS PARA PRÉ-SIMULAÇÃO
+// ========================
+app.get('/lead-presimulation/:leadId', async (req, res) => {
+  try {
+    if (!requireBackendApiKey(req, res)) return;
+
+    const { leadId } = req.params;
+
+    if (!isUuid(leadId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'leadId inválido',
+      });
+    }
+
+    const lead = await getLeadById(leadId);
+
+    if (!lead) {
+      return res.status(404).json({
+        success: false,
+        error: 'Lead não encontrado',
+      });
+    }
+
+    const answers = await getLeadTriageAnswers(leadId);
+
+    return res.json({
+      success: true,
+      data: {
+        lead,
+        answers,
+      },
+    });
+  } catch (error) {
+    console.error('❌ ERRO EM /lead-presimulation:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.response?.data?.message || error.message || 'Erro ao buscar dados de pré-simulação',
+    });
+  }
+});
+
+// ========================
 // DISPARO USADO PELO CRM / ABA DE DISPARO / FUNIL
 // ========================
 app.post('/send-indication-message', async (req, res) => {
@@ -959,6 +1176,13 @@ app.post('/webhook', async (req, res) => {
 
     if (buttonId) {
       if (buttonId === '1') {
+        await saveTriageByPhone({
+          phone,
+          questionKey: 'interesse_credito_clt',
+          questionText: 'Cliente demonstrou interesse em seguir com a análise?',
+          answerValue: 'sim',
+        });
+
         const ok = await sendTemplateFlow(phone, 'resposta_button_1');
 
         if (!ok) {
@@ -974,6 +1198,13 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (buttonId === '2') {
+        await saveTriageByPhone({
+          phone,
+          questionKey: 'interesse_credito_clt',
+          questionText: 'Cliente demonstrou interesse em seguir com a análise?',
+          answerValue: 'nao',
+        });
+
         const ok = await sendTemplateFlow(phone, 'resposta_button_2');
 
         if (!ok) {
@@ -982,6 +1213,16 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (buttonId === '11') {
+        await saveTriageByPhone({
+          phone,
+          questionKey: 'clt_is_working',
+          questionText: 'Está trabalhando atualmente?',
+          answerValue: 'sim',
+          leadPatch: {
+            clt_is_working: true,
+          },
+        });
+
         const ok = await sendTemplateFlow(phone, 'resposta_button_11');
 
         if (!ok) {
@@ -998,6 +1239,17 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (buttonId === '12') {
+        await saveTriageByPhone({
+          phone,
+          questionKey: 'clt_is_working',
+          questionText: 'Está trabalhando atualmente?',
+          answerValue: 'nao',
+          leadPatch: {
+            clt_is_working: false,
+            clt_ready_for_presimulation: false,
+          },
+        });
+
         const ok = await sendTemplateFlow(phone, 'resposta_button_12');
 
         if (!ok) {
@@ -1006,6 +1258,17 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (buttonId === '111') {
+        await saveTriageByPhone({
+          phone,
+          questionKey: 'clt_employment_months',
+          questionText: 'Há quanto tempo está na empresa atual?',
+          answerValue: 'menos_3_meses',
+          leadPatch: {
+            clt_employment_months: 2,
+            clt_ready_for_presimulation: false,
+          },
+        });
+
         const ok = await sendTemplateFlow(phone, 'resposta_button_111');
 
         if (!ok) {
@@ -1014,6 +1277,19 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (buttonId === '112' || buttonId === '113') {
+        const months = buttonId === '112' ? 6 : 12;
+        const answerValue = buttonId === '112' ? '3_a_12_meses' : 'acima_12_meses';
+
+        await saveTriageByPhone({
+          phone,
+          questionKey: 'clt_employment_months',
+          questionText: 'Há quanto tempo está na empresa atual?',
+          answerValue,
+          leadPatch: {
+            clt_employment_months: months,
+          },
+        });
+
         conversationState[phone] = 'aguardando_dados';
 
         const ok = await sendTemplateFlow(phone, 'resposta_button_112_113');
@@ -1027,6 +1303,8 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (conversationState[phone] === 'aguardando_dados' && textMessage.trim()) {
+      await markLeadReadyForPresimulationByPhone(phone, textMessage);
+
       const ok = await sendTemplateFlow(phone, 'resposta_dados_recebidos');
 
       if (!ok) {
