@@ -61,9 +61,17 @@ function cleanCPF(cpf) {
   return String(cpf || '').replace(/\D/g, '');
 }
 
+function normalizeUuid(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[^\w-]/g, '');
+}
+
 function isUuid(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(
-    String(value || '')
+  const normalized = normalizeUuid(value);
+
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    normalized
   );
 }
 
@@ -183,10 +191,12 @@ async function getLeadByPhone(phone) {
 }
 
 async function getLeadById(leadId) {
-  if (!leadId) return null;
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  if (!normalizedLeadId || !isUuid(normalizedLeadId)) return null;
 
   const response = await axios.get(
-    `${SUPABASE_URL}/rest/v1/leads?id=eq.${encodeURIComponent(leadId)}&select=*`,
+    `${SUPABASE_URL}/rest/v1/leads?id=eq.${encodeURIComponent(normalizedLeadId)}&select=*`,
     { headers: getSupabaseHeaders() }
   );
 
@@ -195,11 +205,13 @@ async function getLeadById(leadId) {
 }
 
 async function getLeadMessages(leadId, limit = 12) {
-  if (!leadId) return [];
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  if (!normalizedLeadId || !isUuid(normalizedLeadId)) return [];
 
   const response = await axios.get(
     `${SUPABASE_URL}/rest/v1/lead_messages?lead_id=eq.${encodeURIComponent(
-      leadId
+      normalizedLeadId
     )}&select=direction,message_text,created_at&order=created_at.desc&limit=${limit}`,
     { headers: getSupabaseHeaders() }
   );
@@ -209,13 +221,15 @@ async function getLeadMessages(leadId, limit = 12) {
 }
 
 async function saveLeadMessage({ leadId, direction, messageText }) {
-  if (!leadId || !messageText) return;
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  if (!normalizedLeadId || !isUuid(normalizedLeadId) || !messageText) return;
 
   try {
     await axios.post(
       `${SUPABASE_URL}/rest/v1/lead_messages`,
       {
-        lead_id: leadId,
+        lead_id: normalizedLeadId,
         direction,
         message_text: messageText,
       },
@@ -227,12 +241,14 @@ async function saveLeadMessage({ leadId, direction, messageText }) {
 }
 
 async function updateLeadMessageInfo(leadId, messageText) {
-  if (!isUuid(leadId)) return null;
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  if (!isUuid(normalizedLeadId)) return null;
 
   const now = new Date().toISOString();
 
   await axios.patch(
-    `${SUPABASE_URL}/rest/v1/leads?id=eq.${leadId}`,
+    `${SUPABASE_URL}/rest/v1/leads?id=eq.${normalizedLeadId}`,
     {
       last_message_sent_at: now,
       last_message_sent_text: messageText,
@@ -244,7 +260,9 @@ async function updateLeadMessageInfo(leadId, messageText) {
 }
 
 async function updateLeadFields(leadId, fields) {
-  if (!isUuid(leadId)) {
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  if (!isUuid(normalizedLeadId)) {
     console.log('ℹ️ leadId inválido para atualização:', leadId);
     return null;
   }
@@ -258,7 +276,7 @@ async function updateLeadFields(leadId, fields) {
   }
 
   await axios.patch(
-    `${SUPABASE_URL}/rest/v1/leads?id=eq.${leadId}`,
+    `${SUPABASE_URL}/rest/v1/leads?id=eq.${normalizedLeadId}`,
     safeFields,
     { headers: getSupabaseHeaders() }
   );
@@ -303,9 +321,11 @@ async function saveLeadTriageAnswer({
 }) {
   if (!questionKey || !answerValue) return null;
 
+  const normalizedLeadId = normalizeUuid(leadId);
+
   try {
     const payload = {
-      lead_id: isUuid(leadId) ? leadId : null,
+      lead_id: isUuid(normalizedLeadId) ? normalizedLeadId : null,
       phone: normalizePhone(phone),
       question_key: questionKey,
       question_text: questionText || null,
@@ -352,11 +372,13 @@ async function saveTriageByPhone({
 }
 
 async function getLeadTriageAnswers(leadId) {
-  if (!isUuid(leadId)) return [];
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  if (!isUuid(normalizedLeadId)) return [];
 
   const response = await axios.get(
     `${SUPABASE_URL}/rest/v1/lead_triage_answers?lead_id=eq.${encodeURIComponent(
-      leadId
+      normalizedLeadId
     )}&select=*&order=created_at.asc`,
     { headers: getSupabaseHeaders() }
   );
@@ -514,12 +536,14 @@ async function createAutomationLog({
   status,
   errorMessage,
 }) {
+  const normalizedLeadId = normalizeUuid(leadId);
+
   try {
     await axios.post(
       `${SUPABASE_URL}/rest/v1/funnel_automation_logs`,
       {
         user_id: userId,
-        lead_id: leadId,
+        lead_id: isUuid(normalizedLeadId) ? normalizedLeadId : null,
         from_stage: fromStage,
         to_stage: toStage,
         phone: normalizePhone(phone),
@@ -864,25 +888,29 @@ app.get('/lead-presimulation/:leadId', async (req, res) => {
   try {
     if (!requireBackendApiKey(req, res)) return;
 
-    const { leadId } = req.params;
+    const receivedLeadId = req.params.leadId;
+    const normalizedLeadId = normalizeUuid(receivedLeadId);
 
-    if (!isUuid(leadId)) {
+    if (!isUuid(normalizedLeadId)) {
       return res.status(400).json({
         success: false,
         error: 'leadId inválido',
+        receivedLeadId,
+        normalizedLeadId,
       });
     }
 
-    const lead = await getLeadById(leadId);
+    const lead = await getLeadById(normalizedLeadId);
 
     if (!lead) {
       return res.status(404).json({
         success: false,
         error: 'Lead não encontrado',
+        leadId: normalizedLeadId,
       });
     }
 
-    const answers = await getLeadTriageAnswers(leadId);
+    const answers = await getLeadTriageAnswers(normalizedLeadId);
 
     return res.json({
       success: true,
