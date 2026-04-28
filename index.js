@@ -266,12 +266,16 @@ async function upsertCompanySearchIndex(data) {
     porte: data.porte || null,
   };
 
-  await axios.post(`${SUPABASE_URL}/rest/v1/company_search_index`, payload, {
-    headers: {
-      ...getSupabaseHeaders(),
-      Prefer: 'resolution=merge-duplicates',
-    },
-  });
+  await axios.post(
+    `${SUPABASE_URL}/rest/v1/company_search_index?on_conflict=cnpj`,
+    payload,
+    {
+      headers: {
+        ...getSupabaseHeaders(),
+        Prefer: 'resolution=merge-duplicates',
+      },
+    }
+  );
 
   return payload;
 }
@@ -307,12 +311,16 @@ async function upsertCompanyProfile(data) {
     updated_at: new Date().toISOString(),
   };
 
-  await axios.post(`${SUPABASE_URL}/rest/v1/company_profiles`, payload, {
-    headers: {
-      ...getSupabaseHeaders(),
-      Prefer: 'resolution=merge-duplicates',
-    },
-  });
+  await axios.post(
+    `${SUPABASE_URL}/rest/v1/company_profiles?on_conflict=cnpj`,
+    payload,
+    {
+      headers: {
+        ...getSupabaseHeaders(),
+        Prefer: 'resolution=merge-duplicates',
+      },
+    }
+  );
 
   await upsertCompanySearchIndex(data);
 
@@ -598,6 +606,30 @@ app.post('/consult-cnpj', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ ERRO EM /consult-cnpj:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.response?.data?.message || error.message || 'Erro ao consultar CNPJ',
+    });
+  }
+});
+
+// ========================
+// TESTE CNPJ VIA NAVEGADOR
+// ========================
+app.get('/test-cnpj/:cnpj', async (req, res) => {
+  try {
+    if (!requireBackendApiKey(req, res)) return;
+
+    const data = await fetchCNPJFromBrasilAPI(req.params.cnpj);
+    const saved = await upsertCompanyProfile(data);
+
+    return res.json({
+      success: true,
+      data: saved,
+    });
+  } catch (error) {
+    console.error('❌ ERRO EM /test-cnpj:', error.response?.data || error.message);
 
     return res.status(500).json({
       success: false,
