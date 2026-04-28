@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA DE ATENDIMENTO PARA LEAD QUENTE + CONSULTA CNPJ');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA DE ATENDIMENTO PARA LEAD QUENTE + CONSULTA CNPJ + BUSCA EMPRESA');
 
 const express = require('express');
 const axios = require('axios');
@@ -87,6 +87,22 @@ function mapButtonsForZApi(buttons = []) {
     id: String(button.id),
     label: String(button.text),
   }));
+}
+
+function requireBackendApiKey(req, res) {
+  if (!BACKEND_API_KEY) return true;
+
+  const apiKey = req.headers['x-api-key'];
+
+  if (apiKey !== BACKEND_API_KEY) {
+    res.status(401).json({
+      success: false,
+      error: 'Não autorizado',
+    });
+    return false;
+  }
+
+  return true;
 }
 
 // ========================
@@ -237,6 +253,29 @@ async function fetchCNPJFromBrasilAPI(cnpj) {
   return response.data;
 }
 
+async function upsertCompanySearchIndex(data) {
+  const payload = {
+    cnpj: cleanCNPJ(data.cnpj),
+    razao_social: data.razao_social || null,
+    nome_fantasia: data.nome_fantasia || null,
+    municipio: data.municipio || null,
+    uf: data.uf || null,
+    situacao_cadastral: data.descricao_situacao_cadastral || null,
+    cnae_principal_codigo: data.cnae_fiscal ? String(data.cnae_fiscal) : null,
+    cnae_principal_descricao: data.cnae_fiscal_descricao || null,
+    porte: data.porte || null,
+  };
+
+  await axios.post(`${SUPABASE_URL}/rest/v1/company_search_index`, payload, {
+    headers: {
+      ...getSupabaseHeaders(),
+      Prefer: 'resolution=merge-duplicates',
+    },
+  });
+
+  return payload;
+}
+
 async function upsertCompanyProfile(data) {
   const payload = {
     cnpj: cleanCNPJ(data.cnpj),
@@ -274,6 +313,8 @@ async function upsertCompanyProfile(data) {
       Prefer: 'resolution=merge-duplicates',
     },
   });
+
+  await upsertCompanySearchIndex(data);
 
   return payload;
 }
@@ -537,16 +578,7 @@ app.get('/', (req, res) => {
 // ========================
 app.post('/consult-cnpj', async (req, res) => {
   try {
-    if (BACKEND_API_KEY) {
-      const apiKey = req.headers['x-api-key'];
-
-      if (apiKey !== BACKEND_API_KEY) {
-        return res.status(401).json({
-          success: false,
-          error: 'Não autorizado',
-        });
-      }
-    }
+    if (!requireBackendApiKey(req, res)) return;
 
     const { cnpj } = req.body;
 
@@ -575,20 +607,57 @@ app.post('/consult-cnpj', async (req, res) => {
 });
 
 // ========================
+// BUSCAR EMPRESA POR NOME
+// ========================
+app.get('/search-company', async (req, res) => {
+  try {
+    if (!requireBackendApiKey(req, res)) return;
+
+    const { name, uf } = req.query;
+
+    if (!name || String(name).trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: 'Parâmetro name é obrigatório e precisa ter pelo menos 2 caracteres',
+      });
+    }
+
+    const search = `%${String(name).trim()}%`;
+
+    let query = `${SUPABASE_URL}/rest/v1/company_search_index?select=*&limit=10`;
+
+    query += `&or=(nome_fantasia.ilike.${encodeURIComponent(search)},razao_social.ilike.${encodeURIComponent(search)})`;
+
+    if (uf) {
+      query += `&uf=eq.${encodeURIComponent(String(uf).trim().toUpperCase())}`;
+    }
+
+    query += '&order=nome_fantasia.asc.nullslast';
+
+    const response = await axios.get(query, {
+      headers: getSupabaseHeaders(),
+    });
+
+    return res.json({
+      success: true,
+      data: Array.isArray(response.data) ? response.data : [],
+    });
+  } catch (error) {
+    console.error('❌ ERRO EM /search-company:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.response?.data?.message || error.message || 'Erro ao buscar empresas',
+    });
+  }
+});
+
+// ========================
 // DISPARO USADO PELO CRM / ABA DE DISPARO / FUNIL
 // ========================
 app.post('/send-indication-message', async (req, res) => {
   try {
-    if (BACKEND_API_KEY) {
-      const apiKey = req.headers['x-api-key'];
-
-      if (apiKey !== BACKEND_API_KEY) {
-        return res.status(401).json({
-          success: false,
-          error: 'Não autorizado',
-        });
-      }
-    }
+    if (!requireBackendApiKey(req, res)) return;
 
     const { leadId, phone, templateKey, nome, empresa } = req.body;
 
