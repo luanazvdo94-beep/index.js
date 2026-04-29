@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL');
 
 const express = require('express');
 const axios = require('axios');
@@ -35,6 +35,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
+const NUMON_OFFER_IMAGE_URL = process.env.NUMON_OFFER_IMAGE_URL || '';
 
 const conversationState = {};
 
@@ -48,6 +49,7 @@ const STAGE_IN_PROPOSAL = 'Em proposta';
 const STATUS_NEW_LEAD = 'Novo lead';
 const STATUS_IN_ATTENDANCE = 'Em atendimento';
 const STATUS_IN_PROPOSAL = 'Em proposta';
+const STATUS_OFFER_CHOSEN = 'Oferta escolhida';
 
 // ========================
 // UTILS
@@ -579,6 +581,73 @@ function getPhoneMatchScore(incomingPhone, savedPhone) {
   return 0;
 }
 
+function formatCurrencyBR(value) {
+  const numeric = Number(value || 0);
+
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return 'Não informado';
+  }
+
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(numeric);
+}
+
+function formatInterestRate(value) {
+  if (value === null || value === undefined || value === '') {
+    return 'Não informada';
+  }
+
+  const numeric = Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return String(value);
+  }
+
+  return `${numeric.toLocaleString('pt-BR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  })}% a.m.`;
+}
+
+function buildOfferSummary(offer) {
+  const bank = offer.bank_name || 'Banco não informado';
+  const amount = formatCurrencyBR(offer.released_amount);
+  const installment = formatCurrencyBR(offer.installment_amount);
+  const term = offer.term_months ? `${offer.term_months}x` : 'Prazo não informado';
+
+  return `${bank} — ${amount} — ${term} de ${installment}`;
+}
+
+function buildOfferCarouselText(offer) {
+  const lines = [
+    `Oferta ${offer.offer_number} — ${offer.bank_name || 'Banco não informado'}`,
+    '',
+    `Valor liberado: ${formatCurrencyBR(offer.released_amount)}`,
+    `Parcela: ${formatCurrencyBR(offer.installment_amount)}`,
+    `Prazo: ${offer.term_months ? `${offer.term_months} meses` : 'Não informado'}`,
+    `Taxa: ${formatInterestRate(offer.interest_rate)}`,
+  ];
+
+  if (offer.description) {
+    lines.push('');
+    lines.push(`Observação: ${offer.description}`);
+  }
+
+  lines.push('');
+  lines.push('Toque abaixo para escolher esta opção.');
+
+  return lines.join('\n');
+}
+
+function sanitizeOfferForSending(offer) {
+  return {
+    ...offer,
+    zapi_button_id: `OFFER_${offer.id}`,
+  };
+}
+
 // ========================
 // SUPABASE - TEMPLATES
 // ========================
@@ -855,6 +924,117 @@ async function markClientInteractionByPhone(phone, messageText = '') {
   }
 
   return lead;
+}
+
+// ========================
+// SUPABASE - OFERTAS
+// ========================
+async function getLeadOffersForSending(leadId) {
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  if (!isUuid(normalizedLeadId)) return [];
+
+  const response = await axios.get(
+    `${SUPABASE_URL}/rest/v1/lead_offers?lead_id=eq.${encodeURIComponent(
+      normalizedLeadId
+    )}&status=in.("draft","sent")&select=*&order=offer_number.asc`,
+    { headers: getSupabaseHeaders() }
+  );
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+
+  return rows
+    .filter((offer) => offer.bank_name)
+    .slice(0, 5)
+    .map(sanitizeOfferForSending);
+}
+
+async function getLeadOfferById(offerId) {
+  const normalizedOfferId = normalizeUuid(offerId);
+
+  if (!isUuid(normalizedOfferId)) return null;
+
+  const response = await axios.get(
+    `${SUPABASE_URL}/rest/v1/lead_offers?id=eq.${encodeURIComponent(normalizedOfferId)}&select=*`,
+    { headers: getSupabaseHeaders() }
+  );
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+
+  return rows[0] || null;
+}
+
+async function markOffersAsSent(offers) {
+  const now = new Date().toISOString();
+
+  for (const offer of offers) {
+    try {
+      await axios.patch(
+        `${SUPABASE_URL}/rest/v1/lead_offers?id=eq.${encodeURIComponent(offer.id)}`,
+        {
+          status: 'sent',
+          sent_at: now,
+          zapi_button_id: offer.zapi_button_id,
+        },
+        { headers: getSupabaseHeaders() }
+      );
+    } catch (error) {
+      console.error('⚠️ Erro ao marcar oferta como enviada:', {
+        offerId: offer.id,
+        error: error.response?.data || error.message,
+      });
+    }
+  }
+}
+
+async function markOfferAsChosen(offer) {
+  const now = new Date().toISOString();
+  const summary = buildOfferSummary(offer);
+
+  await axios.patch(
+    `${SUPABASE_URL}/rest/v1/lead_offers?id=eq.${encodeURIComponent(offer.id)}`,
+    {
+      status: 'chosen',
+      chosen_at: now,
+    },
+    { headers: getSupabaseHeaders() }
+  );
+
+  await axios.patch(
+    `${SUPABASE_URL}/rest/v1/lead_offers?lead_id=eq.${encodeURIComponent(
+      offer.lead_id
+    )}&id=neq.${encodeURIComponent(offer.id)}&status=eq.sent`,
+    {
+      status: 'discarded',
+    },
+    { headers: getSupabaseHeaders() }
+  );
+
+  await updateLeadFields(offer.lead_id, {
+    selected_offer_id: offer.id,
+    selected_offer_summary: summary,
+    selected_offer_chosen_at: now,
+    etapa: STAGE_IN_PROPOSAL,
+    status: STATUS_OFFER_CHOSEN,
+    is_archived: false,
+  });
+
+  await saveLeadMessage({
+    leadId: offer.lead_id,
+    direction: 'in',
+    messageText: `[OFERTA ESCOLHIDA] ${summary}`,
+  });
+
+  console.log('✅ Oferta escolhida pelo cliente:', {
+    offerId: offer.id,
+    leadId: offer.lead_id,
+    summary,
+  });
+
+  return {
+    summary,
+    chosenAt: now,
+  };
 }
 
 // ========================
@@ -1192,6 +1372,29 @@ async function sendButtonList(phone, message, buttons, leadId = null) {
   }
 }
 
+async function sendCarousel(phone, message, carousel) {
+  const normalizedPhone = normalizePhone(phone);
+
+  if (!normalizedPhone) {
+    throw new Error('Telefone inválido');
+  }
+
+  await axios.post(
+    `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-carousel`,
+    {
+      phone: normalizedPhone,
+      message,
+      carousel,
+    },
+    {
+      headers: {
+        'Client-Token': ZAPI_CLIENT_TOKEN,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+}
+
 async function sendTemplateMessage({ leadId, phone, templateKey, nome, empresa }) {
   if (!leadId || !phone || !templateKey) {
     throw new Error('Campos obrigatórios faltando');
@@ -1248,6 +1451,53 @@ async function sendTemplateFlow(phone, templateKey) {
   }
 
   return true;
+}
+
+async function sendLeadOffersCarousel({ lead, offers }) {
+  if (!NUMON_OFFER_IMAGE_URL) {
+    throw new Error('NUMON_OFFER_IMAGE_URL não configurada no Railway');
+  }
+
+  const phone = normalizePhone(lead.telefone);
+
+  if (!phone) {
+    throw new Error('Lead sem telefone válido');
+  }
+
+  const carousel = offers.map((offer) => ({
+    text: buildOfferCarouselText(offer),
+    image: NUMON_OFFER_IMAGE_URL,
+    buttons: [
+      {
+        id: offer.zapi_button_id,
+        label: `Escolher Oferta ${offer.offer_number}`,
+        type: 'REPLY',
+      },
+    ],
+  }));
+
+  const message = `Olá${lead.nome ? `, ${lead.nome}` : ''}. Seguem as opções simuladas para você analisar. Escolha a oferta que fizer mais sentido para seguirmos com a proposta.`;
+
+  await sendCarousel(phone, message, carousel);
+
+  const logText = [
+    '[OFERTAS ENVIADAS]',
+    ...offers.map((offer) => buildOfferSummary(offer)),
+  ].join('\n');
+
+  await saveLeadMessage({
+    leadId: lead.id,
+    direction: 'out',
+    messageText: logText,
+  });
+
+  await updateLeadMessageInfo(lead.id, logText);
+
+  return {
+    message,
+    carouselCount: carousel.length,
+    logText,
+  };
 }
 
 // ========================
@@ -1530,6 +1780,84 @@ app.post('/send-indication-message', async (req, res) => {
 });
 
 // ========================
+// OFERTAS - ENVIO DE CARROSSEL
+// ========================
+app.post('/send-lead-offers', async (req, res) => {
+  try {
+    if (!requireBackendApiKey(req, res)) return;
+
+    const { leadId } = req.body;
+
+    const normalizedLeadId = normalizeUuid(leadId);
+
+    if (!isUuid(normalizedLeadId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'leadId inválido',
+      });
+    }
+
+    const lead = await getLeadById(normalizedLeadId);
+
+    if (!lead) {
+      return res.status(404).json({
+        success: false,
+        error: 'Lead não encontrado',
+      });
+    }
+
+    const offers = await getLeadOffersForSending(normalizedLeadId);
+
+    if (offers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Nenhuma oferta válida encontrada para envio',
+      });
+    }
+
+    if (offers.length > 5) {
+      return res.status(400).json({
+        success: false,
+        error: 'Limite máximo de 5 ofertas por envio',
+      });
+    }
+
+    const result = await sendLeadOffersCarousel({
+      lead,
+      offers,
+    });
+
+    await markOffersAsSent(offers);
+
+    await createAutomationLog({
+      userId: lead.user_id,
+      leadId: lead.id,
+      fromStage: lead.etapa || STAGE_IN_PROPOSAL,
+      toStage: lead.etapa || STAGE_IN_PROPOSAL,
+      phone: lead.telefone,
+      leadName: lead.nome,
+      messageText: result.logText,
+      status: 'offers_sent',
+      errorMessage: null,
+    });
+
+    return res.json({
+      success: true,
+      leadId: lead.id,
+      sent: offers.length,
+      message: result.message,
+    });
+  } catch (error) {
+    console.error('❌ ERRO EM /send-lead-offers:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Erro interno ao enviar ofertas',
+    });
+  }
+});
+
+// ========================
 // IA - ENDPOINT DE SUGESTÃO
 // ========================
 app.post('/generate-reply', async (req, res) => {
@@ -1779,6 +2107,25 @@ app.post('/webhook', async (req, res) => {
     await markClientInteractionByPhone(phone, inboundMessage);
 
     if (buttonId) {
+      if (String(buttonId).startsWith('OFFER_')) {
+        const offerId = String(buttonId).replace('OFFER_', '');
+        const offer = await getLeadOfferById(offerId);
+
+        if (!offer) {
+          console.log('⚠️ Oferta não encontrada para buttonId:', buttonId);
+          return res.sendStatus(200);
+        }
+
+        const result = await markOfferAsChosen(offer);
+
+        await sendText(
+          phone,
+          `Perfeito. Você escolheu esta opção:\n\n${result.summary}\n\nVou seguir com a próxima etapa da proposta.`
+        );
+
+        return res.sendStatus(200);
+      }
+
       if (buttonId === '1') {
         await saveTriageByPhone({
           phone,
