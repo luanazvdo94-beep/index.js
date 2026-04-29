@@ -1,10 +1,10 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + KANBAN AUTOMÁTICO + BUSCA INTELIGENTE POR TELEFONE');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + BUSCA INTELIGENTE POR TELEFONE');
 
 const express = require('express');
 const axios = require('axios');
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json());
 
 // ========================
 // CORS
@@ -39,7 +39,7 @@ const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
 const conversationState = {};
 
 // ========================
-// CONSTANTES DO FUNIL
+// CONSTANTES DO KANBAN
 // ========================
 const STAGE_NEW_LEAD = 'Novo lead';
 const STAGE_IN_ATTENDANCE = 'Em atendimento';
@@ -52,12 +52,16 @@ const STATUS_IN_PROPOSAL = 'Em proposta';
 // ========================
 // UTILS
 // ========================
-function getSupabaseHeaders(prefer = null) {
-  const headers = {
+function getSupabaseHeaders() {
+  return {
     apikey: SUPABASE_SERVICE_ROLE_KEY,
     Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
     'Content-Type': 'application/json',
   };
+}
+
+function getSupabaseHeadersWithPrefer(prefer) {
+  const headers = getSupabaseHeaders();
 
   if (prefer) {
     headers.Prefer = prefer;
@@ -66,120 +70,38 @@ function getSupabaseHeaders(prefer = null) {
   return headers;
 }
 
-function assertEnv() {
-  const missing = [];
-
-  if (!ZAPI_INSTANCE) missing.push('ZAPI_INSTANCE');
-  if (!ZAPI_TOKEN) missing.push('ZAPI_TOKEN');
-  if (!ZAPI_CLIENT_TOKEN) missing.push('ZAPI_CLIENT_TOKEN');
-  if (!SUPABASE_URL) missing.push('SUPABASE_URL');
-  if (!SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
-
-  if (missing.length > 0) {
-    console.warn('⚠️ Variáveis de ambiente ausentes:', missing.join(', '));
-  }
-}
-
-assertEnv();
-
 function normalizePhone(phone) {
   return String(phone || '').replace(/\D/g, '');
 }
 
-function onlyDigits(value) {
-  return String(value || '').replace(/\D/g, '');
+function cleanCNPJ(cnpj) {
+  return String(cnpj || '').replace(/\D/g, '');
 }
 
-function normalizeCpf(value) {
-  const digits = onlyDigits(value);
-  return digits.length === 11 ? digits : '';
+function cleanCPF(cpf) {
+  return String(cpf || '').replace(/\D/g, '');
 }
 
-function normalizeCnpj(value) {
-  const digits = onlyDigits(value);
-  return digits.length === 14 ? digits : '';
+function normalizeUuid(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[^\w-]/g, '');
 }
 
 function isUuid(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    String(value || '')
+  const normalized = normalizeUuid(value);
+
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    normalized
   );
-}
-
-function safeString(value) {
-  return String(value || '').trim();
-}
-
-function compactText(value) {
-  return safeString(value).replace(/\s+/g, ' ');
-}
-
-function buildPhoneVariants(phone) {
-  const normalized = normalizePhone(phone);
-  const variants = new Set();
-
-  if (!normalized) return [];
-
-  variants.add(normalized);
-
-  if (normalized.startsWith('55') && normalized.length > 11) {
-    variants.add(normalized.slice(2));
-  }
-
-  if (!normalized.startsWith('55')) {
-    variants.add(`55${normalized}`);
-  }
-
-  if (normalized.length >= 11) {
-    variants.add(normalized.slice(-11));
-  }
-
-  if (normalized.length >= 10) {
-    variants.add(normalized.slice(-10));
-  }
-
-  const without55 = normalized.startsWith('55') ? normalized.slice(2) : normalized;
-
-  if (without55.length >= 11) {
-    variants.add(without55.slice(-11));
-  }
-
-  if (without55.length >= 10) {
-    variants.add(without55.slice(-10));
-  }
-
-  return Array.from(variants).filter(Boolean);
-}
-
-function extractNameAndCpf(textMessage) {
-  const text = compactText(textMessage);
-  const cpf = normalizeCpf(text);
-  let nome = text;
-
-  if (cpf) {
-    nome = text.replace(/(\d{3}\D?\d{3}\D?\d{3}\D?\d{2})/g, '').trim();
-  }
-
-  nome = nome
-    .replace(/cpf/gi, '')
-    .replace(/nome/gi, '')
-    .replace(/[:\-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  return {
-    nome: nome || null,
-    cpf: cpf || null,
-  };
 }
 
 function isHotLead(lead) {
   if (!lead) return false;
 
   const etapa = String(lead.etapa || '').trim().toLowerCase();
-  const allowedStages = ['em atendimento', 'em proposta'];
 
-  return allowedStages.includes(etapa);
+  return ['em atendimento', 'em proposta'].includes(etapa);
 }
 
 function renderTemplate(templateText, variables = {}) {
@@ -202,6 +124,112 @@ function mapButtonsForZApi(buttons = []) {
   }));
 }
 
+function requireBackendApiKey(req, res) {
+  if (!BACKEND_API_KEY) return true;
+
+  const apiKey = req.headers['x-api-key'];
+
+  if (apiKey !== BACKEND_API_KEY) {
+    res.status(401).json({
+      success: false,
+      error: 'Não autorizado',
+    });
+    return false;
+  }
+
+  return true;
+}
+
+function parseNameCpfFromText(text) {
+  const raw = String(text || '').trim();
+  const cpfMatch = raw.match(/(\d{3}\.?\d{3}\.?\d{3}-?\d{2})/);
+  const cpf = cpfMatch ? cleanCPF(cpfMatch[1]) : '';
+
+  let name = raw;
+
+  if (cpfMatch) {
+    name = raw.replace(cpfMatch[1], '').trim();
+  }
+
+  name = name
+    .replace(/cpf/gi, '')
+    .replace(/nome/gi, '')
+    .replace(/[:\-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (name.length < 2) {
+    name = '';
+  }
+
+  return {
+    name,
+    cpf: cpf.length === 11 ? cpf : '',
+  };
+}
+
+function buildPhoneVariants(phone) {
+  const normalized = normalizePhone(phone);
+  const variants = new Set();
+
+  if (!normalized) return [];
+
+  variants.add(normalized);
+
+  if (normalized.startsWith('55') && normalized.length > 11) {
+    variants.add(normalized.slice(2));
+  }
+
+  if (!normalized.startsWith('55')) {
+    variants.add(`55${normalized}`);
+  }
+
+  const without55 = normalized.startsWith('55') ? normalized.slice(2) : normalized;
+
+  if (normalized.length >= 11) {
+    variants.add(normalized.slice(-11));
+  }
+
+  if (normalized.length >= 10) {
+    variants.add(normalized.slice(-10));
+  }
+
+  if (without55.length >= 11) {
+    variants.add(without55.slice(-11));
+  }
+
+  if (without55.length >= 10) {
+    variants.add(without55.slice(-10));
+  }
+
+  return Array.from(variants).filter(Boolean);
+}
+
+function buildSupabaseInList(values) {
+  return `(${values.map((value) => `"${String(value).replace(/"/g, '\\"')}"`).join(',')})`;
+}
+
+function getWebhookPhone(data) {
+  return normalizePhone(
+    data?.phone ||
+      data?.from ||
+      data?.sender ||
+      data?.participantPhone ||
+      data?.connectedPhone ||
+      ''
+  );
+}
+
+function getWebhookButtonId(data) {
+  return (
+    data?.buttonsResponseMessage?.buttonId ||
+    data?.buttonReply?.id ||
+    data?.listResponseMessage?.selectedRowId ||
+    data?.selectedButtonId ||
+    ''
+  );
+}
+
 function getWebhookText(data) {
   return (
     data?.text?.message ||
@@ -214,71 +242,22 @@ function getWebhookText(data) {
   );
 }
 
-function getWebhookButtonId(data) {
-  return (
-    data?.buttonsResponseMessage?.buttonId ||
-    data?.buttonReply?.id ||
-    data?.listResponseMessage?.selectedRowId ||
-    data?.selectedButtonId ||
-    null
-  );
-}
-
-function toSupabaseInList(values) {
-  return `(${values.map((value) => `"${String(value).replace(/"/g, '\\"')}"`).join(',')})`;
-}
-
-// ========================
-// SUPABASE - BASE
-// ========================
-async function supabaseGet(path) {
-  const response = await axios.get(`${SUPABASE_URL}/rest/v1/${path}`, {
-    headers: getSupabaseHeaders(),
-  });
-
-  return response.data;
-}
-
-async function supabasePost(path, payload, prefer = 'return=representation') {
-  const response = await axios.post(`${SUPABASE_URL}/rest/v1/${path}`, payload, {
-    headers: getSupabaseHeaders(prefer),
-  });
-
-  return response.data;
-}
-
-async function supabasePatch(path, payload, prefer = 'return=representation') {
-  const response = await axios.patch(`${SUPABASE_URL}/rest/v1/${path}`, payload, {
-    headers: getSupabaseHeaders(prefer),
-  });
-
-  return response.data;
-}
-
-async function safeSupabasePost(path, payload, label) {
-  try {
-    return await supabasePost(path, payload, 'return=minimal');
-  } catch (error) {
-    console.warn(`⚠️ Falha ignorada em ${label}:`, error.response?.data || error.message);
-    return null;
-  }
-}
-
 // ========================
 // SUPABASE - TEMPLATES
 // ========================
 async function getTemplateByKey(key) {
   try {
-    console.log('🔍 Buscando template:', key);
-
-    const url = `whatsapp_templates?key=eq.${encodeURIComponent(
+    const url = `${SUPABASE_URL}/rest/v1/whatsapp_templates?key=eq.${encodeURIComponent(
       key
     )}&is_active=eq.true&select=*`;
 
-    const rows = await supabaseGet(url);
+    const response = await axios.get(url, {
+      headers: getSupabaseHeaders(),
+    });
+
+    const rows = response.data;
 
     if (!Array.isArray(rows) || rows.length === 0) {
-      console.log('⚠️ Template não encontrado:', key);
       return null;
     }
 
@@ -292,16 +271,6 @@ async function getTemplateByKey(key) {
 // ========================
 // SUPABASE - LEADS / HISTÓRICO
 // ========================
-async function getLeadById(leadId) {
-  if (!leadId || !isUuid(leadId)) return null;
-
-  const rows = await supabaseGet(
-    `leads?id=eq.${encodeURIComponent(leadId)}&select=*&limit=1`
-  );
-
-  return Array.isArray(rows) ? rows[0] || null : null;
-}
-
 async function getLeadByPhone(phone) {
   const normalizedPhone = normalizePhone(phone);
 
@@ -312,30 +281,49 @@ async function getLeadByPhone(phone) {
   console.log('🔎 Buscando lead por telefone. Variantes:', variants);
 
   try {
-    const exactRows = await supabaseGet(
-      `leads?telefone=in.${toSupabaseInList(variants)}&select=*&order=created_at.desc&limit=10`
+    const exactResponse = await axios.get(
+      `${SUPABASE_URL}/rest/v1/leads?telefone=in.${buildSupabaseInList(
+        variants
+      )}&select=*&order=created_at.desc&limit=10`,
+      { headers: getSupabaseHeaders() }
     );
 
-    if (Array.isArray(exactRows) && exactRows.length > 0) {
-      console.log('✅ Lead encontrado por telefone exato:', exactRows[0].id);
+    const exactRows = Array.isArray(exactResponse.data) ? exactResponse.data : [];
+
+    if (exactRows.length > 0) {
+      console.log('✅ Lead encontrado por telefone exato:', {
+        leadId: exactRows[0].id,
+        telefone: exactRows[0].telefone,
+      });
+
       return exactRows[0];
     }
   } catch (error) {
     console.warn('⚠️ Busca exata por telefone falhou:', error.response?.data || error.message);
   }
 
-  for (const variant of variants.sort((a, b) => b.length - a.length)) {
-    if (variant.length < 10) continue;
+  const orderedVariants = variants
+    .filter((variant) => variant.length >= 10)
+    .sort((a, b) => b.length - a.length);
 
+  for (const variant of orderedVariants) {
     try {
-      const rows = await supabaseGet(
-        `leads?telefone=ilike.*${encodeURIComponent(
+      const response = await axios.get(
+        `${SUPABASE_URL}/rest/v1/leads?telefone=ilike.*${encodeURIComponent(
           variant
-        )}&select=*&order=created_at.desc&limit=10`
+        )}&select=*&order=created_at.desc&limit=10`,
+        { headers: getSupabaseHeaders() }
       );
 
-      if (Array.isArray(rows) && rows.length > 0) {
-        console.log('✅ Lead encontrado por final de telefone:', rows[0].id, variant);
+      const rows = Array.isArray(response.data) ? response.data : [];
+
+      if (rows.length > 0) {
+        console.log('✅ Lead encontrado por final de telefone:', {
+          leadId: rows[0].id,
+          telefone: rows[0].telefone,
+          variante: variant,
+        });
+
         return rows[0];
       }
     } catch (error) {
@@ -348,84 +336,102 @@ async function getLeadByPhone(phone) {
   }
 
   console.log('ℹ️ Nenhum lead encontrado para telefone:', normalizedPhone);
+
   return null;
 }
 
-async function getLeadMessages(leadId, limit = 12) {
-  if (!leadId) return [];
+async function getLeadById(leadId) {
+  const normalizedLeadId = normalizeUuid(leadId);
 
-  const rows = await supabaseGet(
-    `lead_messages?lead_id=eq.${encodeURIComponent(
-      leadId
-    )}&select=direction,message_text,created_at&order=created_at.desc&limit=${limit}`
+  if (!normalizedLeadId || !isUuid(normalizedLeadId)) return null;
+
+  const response = await axios.get(
+    `${SUPABASE_URL}/rest/v1/leads?id=eq.${encodeURIComponent(normalizedLeadId)}&select=*`,
+    { headers: getSupabaseHeaders() }
   );
 
-  return Array.isArray(rows) ? rows.reverse() : [];
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return rows[0] || null;
+}
+
+async function getLeadMessages(leadId, limit = 12) {
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  if (!normalizedLeadId || !isUuid(normalizedLeadId)) return [];
+
+  const response = await axios.get(
+    `${SUPABASE_URL}/rest/v1/lead_messages?lead_id=eq.${encodeURIComponent(
+      normalizedLeadId
+    )}&select=direction,message_text,created_at&order=created_at.desc&limit=${limit}`,
+    { headers: getSupabaseHeaders() }
+  );
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return rows.reverse();
 }
 
 async function saveLeadMessage({ leadId, direction, messageText }) {
-  if (!leadId || !messageText) return;
+  const normalizedLeadId = normalizeUuid(leadId);
 
-  await safeSupabasePost(
-    'lead_messages',
-    {
-      lead_id: leadId,
-      direction,
-      message_text: messageText,
-    },
-    'lead_messages'
-  );
-}
+  if (!normalizedLeadId || !isUuid(normalizedLeadId) || !messageText) return;
 
-async function updateLeadById(leadId, payload) {
-  if (!leadId || !isUuid(leadId)) return null;
-
-  const cleanPayload = Object.fromEntries(
-    Object.entries(payload).filter(([, value]) => value !== undefined)
-  );
-
-  if (Object.keys(cleanPayload).length === 0) return null;
-
-  const rows = await supabasePatch(
-    `leads?id=eq.${encodeURIComponent(leadId)}`,
-    cleanPayload,
-    'return=representation'
-  );
-
-  return Array.isArray(rows) ? rows[0] || null : null;
+  try {
+    await axios.post(
+      `${SUPABASE_URL}/rest/v1/lead_messages`,
+      {
+        lead_id: normalizedLeadId,
+        direction,
+        message_text: messageText,
+      },
+      { headers: getSupabaseHeaders() }
+    );
+  } catch (error) {
+    console.error('⚠️ Erro ao salvar lead_messages:', error.response?.data || error.message);
+  }
 }
 
 async function updateLeadMessageInfo(leadId, messageText) {
-  if (!isUuid(leadId)) {
-    console.log('ℹ️ leadId não é UUID válido. Pulando update em leads:', leadId);
-    return null;
-  }
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  if (!isUuid(normalizedLeadId)) return null;
 
   const now = new Date().toISOString();
 
-  await updateLeadById(leadId, {
-    last_message_sent_at: now,
-    last_message_sent_text: messageText,
-  });
+  await axios.patch(
+    `${SUPABASE_URL}/rest/v1/leads?id=eq.${normalizedLeadId}`,
+    {
+      last_message_sent_at: now,
+      last_message_sent_text: messageText,
+    },
+    { headers: getSupabaseHeaders() }
+  );
 
   return now;
 }
 
-async function recordTriageAnswer({ leadId, phone, questionKey, answerValue, rawPayload = null }) {
-  if (!leadId) return null;
+async function updateLeadFields(leadId, fields) {
+  const normalizedLeadId = normalizeUuid(leadId);
 
-  return safeSupabasePost(
-    'lead_triage_answers',
-    {
-      lead_id: leadId,
-      phone: normalizePhone(phone),
-      question_key: questionKey,
-      answer_value: String(answerValue ?? ''),
-      raw_payload: rawPayload,
-      created_at: new Date().toISOString(),
-    },
-    'lead_triage_answers'
+  if (!isUuid(normalizedLeadId)) {
+    console.log('ℹ️ leadId inválido para atualização:', leadId);
+    return null;
+  }
+
+  const safeFields = Object.fromEntries(
+    Object.entries(fields || {}).filter(([, value]) => value !== undefined)
   );
+
+  if (Object.keys(safeFields).length === 0) {
+    return null;
+  }
+
+  await axios.patch(
+    `${SUPABASE_URL}/rest/v1/leads?id=eq.${normalizedLeadId}`,
+    safeFields,
+    { headers: getSupabaseHeaders() }
+  );
+
+  return safeFields;
 }
 
 async function markClientInteractionByPhone(phone, messageText = '') {
@@ -436,11 +442,11 @@ async function markClientInteractionByPhone(phone, messageText = '') {
   const lead = await getLeadByPhone(normalizedPhone);
 
   if (!lead) {
-    console.log('ℹ️ Nenhum lead encontrado para interação:', normalizedPhone);
+    console.log('ℹ️ Interação recebida, mas lead não encontrado:', normalizedPhone);
     return null;
   }
 
-  await updateLeadById(lead.id, {
+  await updateLeadFields(lead.id, {
     last_client_interaction_at: new Date().toISOString(),
   });
 
@@ -451,60 +457,248 @@ async function markClientInteractionByPhone(phone, messageText = '') {
       messageText,
     });
   }
-
-  console.log('📩 Cliente respondeu → histórico salvo e follow-up bloqueado:', normalizedPhone);
 
   return lead;
 }
 
-async function updateLeadKanbanFromWhatsapp({
+// ========================
+// SUPABASE - TRIAGEM CLT
+// ========================
+async function saveLeadTriageAnswer({
+  leadId,
   phone,
-  updates,
-  messageText,
   questionKey,
+  questionText,
   answerValue,
-  rawPayload,
+  source = 'whatsapp',
+}) {
+  if (!questionKey || !answerValue) return null;
+
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  try {
+    const payload = {
+      lead_id: isUuid(normalizedLeadId) ? normalizedLeadId : null,
+      phone: normalizePhone(phone),
+      question_key: questionKey,
+      question_text: questionText || null,
+      answer_value: String(answerValue),
+      source,
+    };
+
+    await axios.post(
+      `${SUPABASE_URL}/rest/v1/lead_triage_answers`,
+      payload,
+      { headers: getSupabaseHeaders() }
+    );
+
+    return payload;
+  } catch (error) {
+    console.error('⚠️ Erro ao salvar lead_triage_answers:', error.response?.data || error.message);
+    return null;
+  }
+}
+
+async function saveTriageByPhone({
+  phone,
+  questionKey,
+  questionText,
+  answerValue,
+  leadPatch = {},
 }) {
   const normalizedPhone = normalizePhone(phone);
   const lead = await getLeadByPhone(normalizedPhone);
 
+  await saveLeadTriageAnswer({
+    leadId: lead?.id || null,
+    phone: normalizedPhone,
+    questionKey,
+    questionText,
+    answerValue,
+  });
+
+  if (lead?.id && Object.keys(leadPatch).length > 0) {
+    await updateLeadFields(lead.id, leadPatch);
+  }
+
+  return lead;
+}
+
+async function getLeadTriageAnswers(leadId) {
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  if (!isUuid(normalizedLeadId)) return [];
+
+  const response = await axios.get(
+    `${SUPABASE_URL}/rest/v1/lead_triage_answers?lead_id=eq.${encodeURIComponent(
+      normalizedLeadId
+    )}&select=*&order=created_at.asc`,
+    { headers: getSupabaseHeaders() }
+  );
+
+  return Array.isArray(response.data) ? response.data : [];
+}
+
+async function moveLeadToKanbanStageByPhone(phone, stage, status) {
+  const normalizedPhone = normalizePhone(phone);
+  const lead = await getLeadByPhone(normalizedPhone);
+
   if (!lead) {
-    console.log('ℹ️ Kanban não atualizado. Lead não encontrado:', normalizedPhone);
+    console.log('ℹ️ Lead não encontrado para mover etapa:', normalizedPhone, stage);
     return null;
   }
 
-  const updatedLead = await updateLeadById(lead.id, {
-    ...updates,
+  await updateLeadFields(lead.id, {
+    etapa: stage,
+    status,
     is_archived: false,
-    last_client_interaction_at: new Date().toISOString(),
   });
 
-  if (messageText) {
-    await saveLeadMessage({
-      leadId: lead.id,
-      direction: 'in',
-      messageText,
-    });
-  }
-
-  if (questionKey) {
-    await recordTriageAnswer({
-      leadId: lead.id,
-      phone: normalizedPhone,
-      questionKey,
-      answerValue,
-      rawPayload,
-    });
-  }
-
-  console.log('✅ Kanban atualizado via WhatsApp:', {
+  console.log('✅ Lead movido automaticamente no Kanban:', {
     leadId: lead.id,
-    from: lead.etapa,
-    to: updates.etapa,
-    status: updates.status,
+    phone: normalizedPhone,
+    etapa: stage,
+    status,
   });
 
-  return updatedLead || lead;
+  return lead;
+}
+
+async function markLeadReadyForPresimulationByPhone(phone, messageText) {
+  const normalizedPhone = normalizePhone(phone);
+  const lead = await getLeadByPhone(normalizedPhone);
+
+  if (!lead) {
+    console.log('ℹ️ Lead não encontrado para marcar pré-simulação:', normalizedPhone);
+    return null;
+  }
+
+  const parsed = parseNameCpfFromText(messageText);
+
+  await saveLeadTriageAnswer({
+    leadId: lead.id,
+    phone: normalizedPhone,
+    questionKey: 'nome_cpf',
+    questionText: 'Informe nome e CPF para simulação',
+    answerValue: messageText,
+  });
+
+  const patch = {
+    clt_ready_for_presimulation: true,
+    clt_triage_completed_at: new Date().toISOString(),
+    etapa: STAGE_IN_PROPOSAL,
+    status: STATUS_IN_PROPOSAL,
+    is_archived: false,
+  };
+
+  if (parsed.name) {
+    patch.nome = parsed.name;
+  }
+
+  if (parsed.cpf) {
+    patch.cpf = parsed.cpf;
+  }
+
+  await updateLeadFields(lead.id, patch);
+
+  console.log('✅ Lead pronto para pré-simulação e movido para Em proposta:', {
+    leadId: lead.id,
+    phone: normalizedPhone,
+    parsed,
+  });
+
+  return {
+    lead,
+    parsed,
+  };
+}
+
+// ========================
+// CNPJ - BRASILAPI + SUPABASE
+// ========================
+async function fetchCNPJFromBrasilAPI(cnpj) {
+  const clean = cleanCNPJ(cnpj);
+
+  if (clean.length !== 14) {
+    throw new Error('CNPJ inválido');
+  }
+
+  const response = await axios.get(`https://brasilapi.com.br/api/cnpj/v1/${clean}`);
+  return response.data;
+}
+
+async function upsertCompanySearchIndex(data) {
+  const payload = {
+    cnpj: cleanCNPJ(data.cnpj),
+    razao_social: data.razao_social || null,
+    nome_fantasia: data.nome_fantasia || null,
+    municipio: data.municipio || null,
+    uf: data.uf || null,
+    situacao_cadastral: data.descricao_situacao_cadastral || null,
+    cnae_principal_codigo: data.cnae_fiscal ? String(data.cnae_fiscal) : null,
+    cnae_principal_descricao: data.cnae_fiscal_descricao || null,
+    porte: data.porte || null,
+  };
+
+  await axios.post(
+    `${SUPABASE_URL}/rest/v1/company_search_index?on_conflict=cnpj`,
+    payload,
+    {
+      headers: {
+        ...getSupabaseHeaders(),
+        Prefer: 'resolution=merge-duplicates',
+      },
+    }
+  );
+
+  return payload;
+}
+
+async function upsertCompanyProfile(data) {
+  const payload = {
+    cnpj: cleanCNPJ(data.cnpj),
+    razao_social: data.razao_social || null,
+    nome_fantasia: data.nome_fantasia || null,
+    situacao_cadastral: data.descricao_situacao_cadastral || null,
+    data_abertura: data.data_inicio_atividade || null,
+    natureza_juridica: data.natureza_juridica || null,
+    porte: data.porte || null,
+
+    cnae_principal_codigo: data.cnae_fiscal ? String(data.cnae_fiscal) : null,
+    cnae_principal_descricao: data.cnae_fiscal_descricao || null,
+    cnaes_secundarios: data.cnaes_secundarios || [],
+
+    endereco: {
+      logradouro: data.logradouro || null,
+      numero: data.numero || null,
+      complemento: data.complemento || null,
+      bairro: data.bairro || null,
+      municipio: data.municipio || null,
+      uf: data.uf || null,
+      cep: data.cep || null,
+    },
+
+    socios: data.qsa || [],
+    raw_data: data,
+    source: 'brasilapi',
+    last_checked_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  await axios.post(
+    `${SUPABASE_URL}/rest/v1/company_profiles?on_conflict=cnpj`,
+    payload,
+    {
+      headers: {
+        ...getSupabaseHeaders(),
+        Prefer: 'resolution=merge-duplicates',
+      },
+    }
+  );
+
+  await upsertCompanySearchIndex(data);
+
+  return payload;
 }
 
 // ========================
@@ -521,21 +715,27 @@ async function createAutomationLog({
   status,
   errorMessage,
 }) {
-  await safeSupabasePost(
-    'funnel_automation_logs',
-    {
-      user_id: userId,
-      lead_id: leadId,
-      from_stage: fromStage,
-      to_stage: toStage,
-      phone: normalizePhone(phone),
-      lead_name: leadName,
-      message_text: messageText || null,
-      status,
-      error_message: errorMessage || null,
-    },
-    'funnel_automation_logs'
-  );
+  const normalizedLeadId = normalizeUuid(leadId);
+
+  try {
+    await axios.post(
+      `${SUPABASE_URL}/rest/v1/funnel_automation_logs`,
+      {
+        user_id: userId,
+        lead_id: isUuid(normalizedLeadId) ? normalizedLeadId : null,
+        from_stage: fromStage,
+        to_stage: toStage,
+        phone: normalizePhone(phone),
+        lead_name: leadName,
+        message_text: messageText || null,
+        status,
+        error_message: errorMessage || null,
+      },
+      { headers: getSupabaseHeaders() }
+    );
+  } catch (error) {
+    console.error('❌ Erro ao criar log de automação:', error.response?.data || error.message);
+  }
 }
 
 // ========================
@@ -646,6 +846,7 @@ async function sendTemplateFlow(phone, templateKey) {
 
   const message = renderTemplate(template.message_text, {});
   const buttons = mapButtonsForZApi(template.buttons || []);
+
   const lead = await getLeadByPhone(normalizedPhone);
   const leadId = lead?.id || null;
 
@@ -655,241 +856,11 @@ async function sendTemplateFlow(phone, templateKey) {
     await sendText(normalizedPhone, message, leadId);
   }
 
-  console.log('✅ Fluxo via template:', templateKey);
   return true;
 }
 
 // ========================
-// EMPRESAS / BRASILAPI / PRÉ-SIMULAÇÃO
-// ========================
-async function getCompanyProfileByCnpj(cnpj) {
-  const cleanCnpj = normalizeCnpj(cnpj);
-
-  if (!cleanCnpj) return null;
-
-  try {
-    const rows = await supabaseGet(
-      `company_profiles?cnpj=eq.${encodeURIComponent(cleanCnpj)}&select=*&limit=1`
-    );
-
-    return Array.isArray(rows) ? rows[0] || null : null;
-  } catch (error) {
-    console.warn('⚠️ Erro ao buscar company_profiles:', error.response?.data || error.message);
-    return null;
-  }
-}
-
-async function getCompanyFromBrasilApi(cnpj) {
-  const cleanCnpj = normalizeCnpj(cnpj);
-
-  if (!cleanCnpj) return null;
-
-  try {
-    const response = await axios.get(`https://brasilapi.com.br/api/cnpj/v1/${cleanCnpj}`, {
-      timeout: 12000,
-    });
-
-    return response.data || null;
-  } catch (error) {
-    console.warn('⚠️ BrasilAPI não retornou CNPJ:', cleanCnpj, error.response?.data || error.message);
-    return null;
-  }
-}
-
-async function upsertCompanyCacheFromBrasilApi(company) {
-  if (!company?.cnpj) return null;
-
-  const cnpj = normalizeCnpj(company.cnpj);
-  const razaoSocial = company.razao_social || company.nome_fantasia || null;
-  const nomeFantasia = company.nome_fantasia || null;
-
-  await safeSupabasePost(
-    'company_profiles',
-    {
-      cnpj,
-      razao_social: razaoSocial,
-      nome_fantasia: nomeFantasia,
-      situacao_cadastral: company.descricao_situacao_cadastral || company.situacao_cadastral || null,
-      cnae_fiscal: company.cnae_fiscal || null,
-      cnae_fiscal_descricao: company.cnae_fiscal_descricao || null,
-      municipio: company.municipio || null,
-      uf: company.uf || null,
-      raw_data: company,
-    },
-    'company_profiles upsert'
-  );
-
-  await safeSupabasePost(
-    'company_search_index',
-    {
-      cnpj,
-      razao_social: razaoSocial,
-      nome_fantasia: nomeFantasia,
-      search_text: `${razaoSocial || ''} ${nomeFantasia || ''} ${cnpj}`.trim(),
-    },
-    'company_search_index upsert'
-  );
-
-  return true;
-}
-
-app.get('/company-search', async (req, res) => {
-  try {
-    const query = compactText(req.query.q || req.query.query || '');
-
-    if (query.length < 2) {
-      return res.json({
-        success: true,
-        rows: [],
-      });
-    }
-
-    const rows = await supabaseGet(
-      `company_search_index?or=(razao_social.ilike.*${encodeURIComponent(
-        query
-      )}*,nome_fantasia.ilike.*${encodeURIComponent(query)}*,cnpj.ilike.*${encodeURIComponent(
-        onlyDigits(query)
-      )}*)&select=*&limit=20`
-    );
-
-    return res.json({
-      success: true,
-      rows: Array.isArray(rows) ? rows : [],
-    });
-  } catch (error) {
-    console.error('❌ ERRO EM /company-search:', error.response?.data || error.message);
-
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Erro interno na busca de empresa',
-    });
-  }
-});
-
-app.get('/company/:cnpj', async (req, res) => {
-  try {
-    const cnpj = normalizeCnpj(req.params.cnpj);
-
-    if (!cnpj) {
-      return res.status(400).json({
-        success: false,
-        error: 'CNPJ inválido',
-      });
-    }
-
-    let company = await getCompanyProfileByCnpj(cnpj);
-    let source = 'supabase';
-
-    if (!company) {
-      company = await getCompanyFromBrasilApi(cnpj);
-      source = 'brasilapi';
-
-      if (company) {
-        await upsertCompanyCacheFromBrasilApi(company);
-      }
-    }
-
-    if (!company) {
-      return res.status(404).json({
-        success: false,
-        error: 'Empresa não encontrada',
-      });
-    }
-
-    return res.json({
-      success: true,
-      source,
-      company,
-    });
-  } catch (error) {
-    console.error('❌ ERRO EM /company/:cnpj:', error.response?.data || error.message);
-
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Erro interno ao consultar empresa',
-    });
-  }
-});
-
-app.get('/lead-presimulation/:leadId', async (req, res) => {
-  try {
-    const leadId = req.params.leadId;
-
-    if (!isUuid(leadId)) {
-      return res.status(400).json({
-        success: false,
-        error: 'leadId inválido',
-      });
-    }
-
-    const lead = await getLeadById(leadId);
-
-    if (!lead) {
-      return res.status(404).json({
-        success: false,
-        error: 'Lead não encontrado',
-      });
-    }
-
-    const cnpj = normalizeCnpj(lead.clt_company_cnpj || lead.cnpj || '');
-    let company = null;
-    let companySource = null;
-
-    if (cnpj) {
-      company = await getCompanyProfileByCnpj(cnpj);
-      companySource = company ? 'supabase' : null;
-
-      if (!company) {
-        company = await getCompanyFromBrasilApi(cnpj);
-        companySource = company ? 'brasilapi' : null;
-
-        if (company) {
-          await upsertCompanyCacheFromBrasilApi(company);
-        }
-      }
-    }
-
-    const presimulation = {
-      lead_id: lead.id,
-      nome: lead.nome || '',
-      cpf: lead.cpf || '',
-      telefone: lead.telefone || '',
-      idade: lead.clt_age ?? lead.idade ?? null,
-      isWorking: lead.clt_is_working ?? null,
-      employmentMonths: lead.clt_employment_months ?? null,
-      hasActiveLoan: lead.clt_has_active_loan ?? null,
-      companyName:
-        lead.clt_company_name ||
-        lead.empresa ||
-        company?.razao_social ||
-        company?.nome_fantasia ||
-        company?.nome ||
-        '',
-      companyCnpj: cnpj || '',
-      readyForPresimulation: Boolean(lead.clt_ready_for_presimulation),
-      triageCompletedAt: lead.clt_triage_completed_at || null,
-    };
-
-    return res.json({
-      success: true,
-      lead,
-      company,
-      companySource,
-      presimulation,
-      data: presimulation,
-    });
-  } catch (error) {
-    console.error('❌ ERRO EM /lead-presimulation/:leadId:', error.response?.data || error.message);
-
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Erro interno na pré-simulação do lead',
-    });
-  }
-});
-
-// ========================
-// IA - GERAÇÃO DE RESPOSTA
+// IA
 // ========================
 function buildAiInstructions() {
   return `
@@ -905,16 +876,6 @@ Função:
 - Seja natural, curto, comercial e confiável.
 - Responda como um consultor de crédito experiente no Brasil.
 - Sempre conduza para a próxima ação objetiva.
-
-Regras de qualidade:
-- Máximo de 3 parágrafos curtos.
-- Evite "Prezado", "agradecemos o contato", "estamos à disposição" de forma genérica.
-- Use o nome do cliente se estiver disponível.
-- Se faltar informação, peça apenas uma confirmação objetiva.
-- Se o cliente estiver inseguro, reforce segurança e clareza.
-- Se o cliente perguntar taxa/valor/parcela e não houver dados no contexto, diga que vai conferir/simular antes de passar condição.
-- Se o cliente pedir cancelamento ou não tiver interesse, responda com respeito e deixe porta aberta.
-- Se houver risco jurídico/financeiro, seja conservador.
 
 A resposta deve conter apenas o texto sugerido para WhatsApp.
 `.trim();
@@ -996,30 +957,166 @@ app.get('/', (req, res) => {
   res.send('Webhook online');
 });
 
-app.get('/health', (req, res) => {
-  res.json({
-    success: true,
-    service: 'NumON Backend',
-    status: 'online',
-    timestamp: new Date().toISOString(),
-  });
+// ========================
+// CONSULTA CNPJ
+// ========================
+app.post('/consult-cnpj', async (req, res) => {
+  try {
+    if (!requireBackendApiKey(req, res)) return;
+
+    const { cnpj } = req.body;
+
+    if (!cnpj) {
+      return res.status(400).json({
+        success: false,
+        error: 'CNPJ é obrigatório',
+      });
+    }
+
+    const data = await fetchCNPJFromBrasilAPI(cnpj);
+    const saved = await upsertCompanyProfile(data);
+
+    return res.json({
+      success: true,
+      data: saved,
+    });
+  } catch (error) {
+    console.error('❌ ERRO EM /consult-cnpj:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.response?.data?.message || error.message || 'Erro ao consultar CNPJ',
+    });
+  }
+});
+
+// ========================
+// TESTE CNPJ VIA NAVEGADOR
+// ========================
+app.get('/test-cnpj/:cnpj', async (req, res) => {
+  try {
+    if (!requireBackendApiKey(req, res)) return;
+
+    const data = await fetchCNPJFromBrasilAPI(req.params.cnpj);
+    const saved = await upsertCompanyProfile(data);
+
+    return res.json({
+      success: true,
+      data: saved,
+    });
+  } catch (error) {
+    console.error('❌ ERRO EM /test-cnpj:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.response?.data?.message || error.message || 'Erro ao consultar CNPJ',
+    });
+  }
+});
+
+// ========================
+// BUSCAR EMPRESA POR NOME
+// ========================
+app.get('/search-company', async (req, res) => {
+  try {
+    if (!requireBackendApiKey(req, res)) return;
+
+    const { name, uf } = req.query;
+
+    if (!name || String(name).trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: 'Parâmetro name é obrigatório e precisa ter pelo menos 2 caracteres',
+      });
+    }
+
+    const search = `%${String(name).trim()}%`;
+
+    let query = `${SUPABASE_URL}/rest/v1/company_search_index?select=*&limit=10`;
+
+    query += `&or=(nome_fantasia.ilike.${encodeURIComponent(search)},razao_social.ilike.${encodeURIComponent(search)})`;
+
+    if (uf) {
+      query += `&uf=eq.${encodeURIComponent(String(uf).trim().toUpperCase())}`;
+    }
+
+    query += '&order=nome_fantasia.asc.nullslast';
+
+    const response = await axios.get(query, {
+      headers: getSupabaseHeaders(),
+    });
+
+    return res.json({
+      success: true,
+      data: Array.isArray(response.data) ? response.data : [],
+    });
+  } catch (error) {
+    console.error('❌ ERRO EM /search-company:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.response?.data?.message || error.message || 'Erro ao buscar empresas',
+    });
+  }
+});
+
+// ========================
+// DADOS ROBUSTOS PARA PRÉ-SIMULAÇÃO
+// ========================
+app.get('/lead-presimulation/:leadId', async (req, res) => {
+  try {
+    if (!requireBackendApiKey(req, res)) return;
+
+    const receivedLeadId = req.params.leadId;
+    const normalizedLeadId = normalizeUuid(receivedLeadId);
+
+    if (!isUuid(normalizedLeadId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'leadId inválido',
+        receivedLeadId,
+        normalizedLeadId,
+      });
+    }
+
+    const lead = await getLeadById(normalizedLeadId);
+
+    if (!lead) {
+      return res.status(404).json({
+        success: false,
+        error: 'Lead não encontrado',
+        leadId: normalizedLeadId,
+      });
+    }
+
+    const answers = await getLeadTriageAnswers(normalizedLeadId);
+
+    return res.json({
+      success: true,
+      data: {
+        lead,
+        answers,
+      },
+    });
+  } catch (error) {
+    console.error('❌ ERRO EM /lead-presimulation:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.response?.data?.message || error.message || 'Erro ao buscar dados de pré-simulação',
+    });
+  }
 });
 
 // ========================
 // DISPARO USADO PELO CRM / ABA DE DISPARO / FUNIL
+// IMPORTANTE:
+// Disparo feito NÃO coloca automaticamente o lead no Kanban.
+// O Kanban só muda quando o cliente responde a triagem.
 // ========================
 app.post('/send-indication-message', async (req, res) => {
   try {
-    if (BACKEND_API_KEY) {
-      const apiKey = req.headers['x-api-key'];
-
-      if (apiKey !== BACKEND_API_KEY) {
-        return res.status(401).json({
-          success: false,
-          error: 'Não autorizado',
-        });
-      }
-    }
+    if (!requireBackendApiKey(req, res)) return;
 
     const { leadId, phone, templateKey, nome, empresa } = req.body;
 
@@ -1103,8 +1200,6 @@ app.post('/generate-reply', async (req, res) => {
 // SEQUÊNCIA INTELIGENTE / FOLLOW-UP
 // ========================
 async function runFollowups() {
-  console.log('🚀 Sequência inteligente rodando...');
-
   const result = {
     success: true,
     checkedSteps: 0,
@@ -1117,79 +1212,56 @@ async function runFollowups() {
     errors: [],
   };
 
-  const steps = await supabaseGet(
-    'funnel_followup_sequence_steps?is_active=eq.true&select=*&order=step_number.asc'
+  const stepsResponse = await axios.get(
+    `${SUPABASE_URL}/rest/v1/funnel_followup_sequence_steps?is_active=eq.true&select=*&order=step_number.asc`,
+    { headers: getSupabaseHeaders() }
   );
 
-  const sequenceSteps = Array.isArray(steps) ? steps : [];
-  result.checkedSteps = sequenceSteps.length;
+  const steps = Array.isArray(stepsResponse.data) ? stepsResponse.data : [];
+  result.checkedSteps = steps.length;
 
-  for (const step of sequenceSteps) {
-    const leads = await supabaseGet(
-      `leads?etapa=eq.${encodeURIComponent(step.stage)}&user_id=eq.${encodeURIComponent(
-        step.user_id
-      )}&select=*`
+  for (const step of steps) {
+    const leadsResponse = await axios.get(
+      `${SUPABASE_URL}/rest/v1/leads?etapa=eq.${encodeURIComponent(
+        step.stage
+      )}&user_id=eq.${encodeURIComponent(step.user_id)}&select=*`,
+      { headers: getSupabaseHeaders() }
     );
 
-    const stageLeads = Array.isArray(leads) ? leads : [];
-    result.checkedLeads += stageLeads.length;
+    const leads = Array.isArray(leadsResponse.data) ? leadsResponse.data : [];
+    result.checkedLeads += leads.length;
 
-    for (const lead of stageLeads) {
+    for (const lead of leads) {
       const phone = normalizePhone(lead.telefone);
 
       try {
         if (!phone) {
           result.skipped += 1;
-
-          await createAutomationLog({
-            userId: step.user_id,
-            leadId: lead.id,
-            fromStage: step.stage,
-            toStage: step.stage,
-            phone,
-            leadName: lead.nome,
-            messageText: null,
-            status: 'followup_skipped_no_phone',
-            errorMessage: 'Lead sem telefone válido.',
-          });
-
           continue;
         }
 
         if (lead.last_client_interaction_at) {
           result.skipped += 1;
           result.skippedByResponse += 1;
-
-          await createAutomationLog({
-            userId: step.user_id,
-            leadId: lead.id,
-            fromStage: step.stage,
-            toStage: step.stage,
-            phone,
-            leadName: lead.nome,
-            messageText: null,
-            status: 'blocked_by_response',
-            errorMessage: 'Cliente respondeu. Follow-up bloqueado.',
-          });
-
           continue;
         }
 
-        const sentLogs = await supabaseGet(
-          `funnel_automation_logs?lead_id=eq.${encodeURIComponent(
+        const sentLogsResponse = await axios.get(
+          `${SUPABASE_URL}/rest/v1/funnel_automation_logs?lead_id=eq.${encodeURIComponent(
             lead.id
-          )}&status=eq.followup_sent&select=id,created_at,message_text&order=created_at.desc`
+          )}&status=eq.followup_sent&select=id,created_at,message_text&order=created_at.desc`,
+          { headers: getSupabaseHeaders() }
         );
 
-        const previousLogs = Array.isArray(sentLogs) ? sentLogs : [];
+        const sentLogs = Array.isArray(sentLogsResponse.data) ? sentLogsResponse.data : [];
 
-        if (previousLogs.length >= Number(step.step_number || 1)) {
+        if (sentLogs.length >= Number(step.step_number || 1)) {
           result.skipped += 1;
           result.skippedAlreadySent += 1;
           continue;
         }
 
-        const lastLog = previousLogs[0] || null;
+        const lastLog = sentLogs[0] || null;
 
         if (lastLog) {
           const diffMinutes =
@@ -1216,7 +1288,7 @@ async function runFollowups() {
           phone,
           templateKey: step.template_key,
           nome: lead.nome,
-          empresa: lead.empresa || lead.clt_company_name,
+          empresa: lead.empresa,
         });
 
         await createAutomationLog({
@@ -1295,7 +1367,7 @@ app.post('/webhook', async (req, res) => {
   try {
     const data = req.body;
 
-    const phone = normalizePhone(data.phone || data.from || data.sender);
+    const phone = getWebhookPhone(data);
     const buttonId = getWebhookButtonId(data);
     const textMessage = getWebhookText(data);
 
@@ -1303,25 +1375,27 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    const inboundLabel = buttonId
+    const inboundMessage = buttonId
       ? `[BOTÃO ${buttonId}] ${textMessage || ''}`.trim()
       : textMessage;
 
-    await markClientInteractionByPhone(phone, inboundLabel);
+    await markClientInteractionByPhone(phone, inboundMessage);
 
     if (buttonId) {
+      // PRIMEIRA RESPOSTA POSITIVA:
+      // cliente entra no Kanban como Novo lead.
       if (buttonId === '1') {
-        await updateLeadKanbanFromWhatsapp({
+        await saveTriageByPhone({
           phone,
-          updates: {
+          questionKey: 'interesse_credito_clt',
+          questionText: 'Cliente demonstrou interesse em seguir com a análise?',
+          answerValue: 'sim',
+          leadPatch: {
             etapa: STAGE_NEW_LEAD,
             status: STATUS_NEW_LEAD,
+            is_archived: false,
             clt_ready_for_presimulation: false,
           },
-          messageText: null,
-          questionKey: 'first_positive_interest',
-          answerValue: 'sim',
-          rawPayload: data,
         });
 
         const ok = await sendTemplateFlow(phone, 'resposta_button_1');
@@ -1340,40 +1414,44 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
+      // RESPOSTA NEGATIVA:
+      // não deve colocar o lead em atendimento.
       if (buttonId === '2') {
-        await updateLeadKanbanFromWhatsapp({
+        await saveTriageByPhone({
           phone,
-          updates: {
-            status: 'Sem interesse',
-          },
-          messageText: null,
-          questionKey: 'first_positive_interest',
+          questionKey: 'interesse_credito_clt',
+          questionText: 'Cliente demonstrou interesse em seguir com a análise?',
           answerValue: 'nao',
-          rawPayload: data,
+          leadPatch: {
+            status: 'Sem interesse',
+            clt_ready_for_presimulation: false,
+          },
         });
 
         const ok = await sendTemplateFlow(phone, 'resposta_button_2');
 
         if (!ok) {
-          await sendText(phone, 'Tem certeza? Se mudar de ideia, estaremos à disposição!');
+          await sendText(phone, 'Tudo bem. Se mudar de ideia, ficamos à disposição.');
         }
 
         return res.sendStatus(200);
       }
 
+      // SEGUNDA RESPOSTA POSITIVA:
+      // cliente muda para Em atendimento.
       if (buttonId === '11') {
-        await updateLeadKanbanFromWhatsapp({
+        await saveTriageByPhone({
           phone,
-          updates: {
+          questionKey: 'clt_is_working',
+          questionText: 'Está trabalhando atualmente?',
+          answerValue: 'sim',
+          leadPatch: {
+            clt_is_working: true,
             etapa: STAGE_IN_ATTENDANCE,
             status: STATUS_IN_ATTENDANCE,
-            clt_is_working: true,
+            is_archived: false,
             clt_ready_for_presimulation: false,
           },
-          messageText: null,
-          questionKey: 'is_working_clt',
-          answerValue: 'sim',
-          rawPayload: data,
         });
 
         const ok = await sendTemplateFlow(phone, 'resposta_button_11');
@@ -1393,18 +1471,19 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
+      // NÃO ESTÁ TRABALHANDO:
+      // mantém fora da pré-simulação.
       if (buttonId === '12') {
-        await updateLeadKanbanFromWhatsapp({
+        await saveTriageByPhone({
           phone,
-          updates: {
+          questionKey: 'clt_is_working',
+          questionText: 'Está trabalhando atualmente?',
+          answerValue: 'nao',
+          leadPatch: {
             clt_is_working: false,
             clt_ready_for_presimulation: false,
             status: 'Não elegível',
           },
-          messageText: null,
-          questionKey: 'is_working_clt',
-          answerValue: 'nao',
-          rawPayload: data,
         });
 
         const ok = await sendTemplateFlow(phone, 'resposta_button_12');
@@ -1416,19 +1495,19 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
+      // TEMPO DE EMPRESA INSUFICIENTE:
+      // não vai para pré-simulação.
       if (buttonId === '111') {
-        await updateLeadKanbanFromWhatsapp({
+        await saveTriageByPhone({
           phone,
-          updates: {
-            etapa: STAGE_IN_ATTENDANCE,
-            status: 'Não elegível',
+          questionKey: 'clt_employment_months',
+          questionText: 'Há quanto tempo está na empresa atual?',
+          answerValue: 'menos_3_meses',
+          leadPatch: {
             clt_employment_months: 2,
             clt_ready_for_presimulation: false,
+            status: 'Não elegível',
           },
-          messageText: null,
-          questionKey: 'employment_time',
-          answerValue: 'menos_3_meses',
-          rawPayload: data,
         });
 
         const ok = await sendTemplateFlow(phone, 'resposta_button_111');
@@ -1440,22 +1519,24 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
+      // TEMPO DE EMPRESA ELEGÍVEL:
+      // permanece em atendimento e aguarda nome/CPF.
       if (buttonId === '112' || buttonId === '113') {
-        const employmentMonths = buttonId === '112' ? 6 : 13;
+        const months = buttonId === '112' ? 6 : 12;
+        const answerValue = buttonId === '112' ? '3_a_12_meses' : 'acima_12_meses';
 
-        await updateLeadKanbanFromWhatsapp({
+        await saveTriageByPhone({
           phone,
-          updates: {
+          questionKey: 'clt_employment_months',
+          questionText: 'Há quanto tempo está na empresa atual?',
+          answerValue,
+          leadPatch: {
+            clt_employment_months: months,
             etapa: STAGE_IN_ATTENDANCE,
             status: STATUS_IN_ATTENDANCE,
-            clt_is_working: true,
-            clt_employment_months: employmentMonths,
+            is_archived: false,
             clt_ready_for_presimulation: false,
           },
-          messageText: null,
-          questionKey: 'employment_time',
-          answerValue: buttonId === '112' ? '3_meses_a_1_ano' : 'acima_1_ano',
-          rawPayload: data,
         });
 
         conversationState[phone] = 'aguardando_dados';
@@ -1472,27 +1553,10 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // NOME/CPF RECEBIDO:
+    // conclui triagem, move para Em proposta e libera Pré-simular.
     if (conversationState[phone] === 'aguardando_dados' && textMessage.trim()) {
-      const parsed = extractNameAndCpf(textMessage);
-
-      const updatePayload = {
-        etapa: STAGE_IN_PROPOSAL,
-        status: STATUS_IN_PROPOSAL,
-        clt_ready_for_presimulation: true,
-        clt_triage_completed_at: new Date().toISOString(),
-      };
-
-      if (parsed.nome) updatePayload.nome = parsed.nome;
-      if (parsed.cpf) updatePayload.cpf = parsed.cpf;
-
-      await updateLeadKanbanFromWhatsapp({
-        phone,
-        updates: updatePayload,
-        messageText: null,
-        questionKey: 'name_cpf_received',
-        answerValue: textMessage,
-        rawPayload: data,
-      });
+      await markLeadReadyForPresimulationByPhone(phone, textMessage);
 
       const ok = await sendTemplateFlow(phone, 'resposta_dados_recebidos');
 
