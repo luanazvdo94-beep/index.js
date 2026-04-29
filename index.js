@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO');
 
 const express = require('express');
 const axios = require('axios');
@@ -386,6 +386,30 @@ async function getLeadTriageAnswers(leadId) {
   return Array.isArray(response.data) ? response.data : [];
 }
 
+async function moveLeadToKanbanStageByPhone(phone, stage, status) {
+  const normalizedPhone = normalizePhone(phone);
+  const lead = await getLeadByPhone(normalizedPhone);
+
+  if (!lead) {
+    console.log('ℹ️ Lead não encontrado para mover etapa:', normalizedPhone, stage);
+    return null;
+  }
+
+  await updateLeadFields(lead.id, {
+    etapa: stage,
+    status,
+  });
+
+  console.log('✅ Lead movido automaticamente no Kanban:', {
+    leadId: lead.id,
+    phone: normalizedPhone,
+    etapa: stage,
+    status,
+  });
+
+  return lead;
+}
+
 async function markLeadReadyForPresimulationByPhone(phone, messageText) {
   const normalizedPhone = normalizePhone(phone);
   const lead = await getLeadByPhone(normalizedPhone);
@@ -408,8 +432,8 @@ async function markLeadReadyForPresimulationByPhone(phone, messageText) {
   const patch = {
     clt_ready_for_presimulation: true,
     clt_triage_completed_at: new Date().toISOString(),
-    etapa: 'Simulação',
-    status: 'Contato iniciado',
+    etapa: 'Em proposta',
+    status: 'Em proposta',
   };
 
   if (parsed.name) {
@@ -422,7 +446,7 @@ async function markLeadReadyForPresimulationByPhone(phone, messageText) {
 
   await updateLeadFields(lead.id, patch);
 
-  console.log('✅ Lead pronto para pré-simulação:', {
+  console.log('✅ Lead pronto para pré-simulação e movido para Em proposta:', {
     leadId: lead.id,
     phone: normalizedPhone,
     parsed,
@@ -1209,6 +1233,10 @@ app.post('/webhook', async (req, res) => {
           questionKey: 'interesse_credito_clt',
           questionText: 'Cliente demonstrou interesse em seguir com a análise?',
           answerValue: 'sim',
+          leadPatch: {
+            etapa: 'Em atendimento',
+            status: 'Contato iniciado',
+          },
         });
 
         const ok = await sendTemplateFlow(phone, 'resposta_button_1');
@@ -1231,6 +1259,10 @@ app.post('/webhook', async (req, res) => {
           questionKey: 'interesse_credito_clt',
           questionText: 'Cliente demonstrou interesse em seguir com a análise?',
           answerValue: 'nao',
+          leadPatch: {
+            etapa: 'Vai analisar',
+            status: 'Aguardando retorno',
+          },
         });
 
         const ok = await sendTemplateFlow(phone, 'resposta_button_2');
@@ -1248,6 +1280,8 @@ app.post('/webhook', async (req, res) => {
           answerValue: 'sim',
           leadPatch: {
             clt_is_working: true,
+            etapa: 'Em atendimento',
+            status: 'Contato iniciado',
           },
         });
 
@@ -1275,6 +1309,8 @@ app.post('/webhook', async (req, res) => {
           leadPatch: {
             clt_is_working: false,
             clt_ready_for_presimulation: false,
+            etapa: 'Vai analisar',
+            status: 'Aguardando retorno',
           },
         });
 
@@ -1294,6 +1330,8 @@ app.post('/webhook', async (req, res) => {
           leadPatch: {
             clt_employment_months: 2,
             clt_ready_for_presimulation: false,
+            etapa: 'Vai analisar',
+            status: 'Aguardando retorno',
           },
         });
 
@@ -1315,6 +1353,8 @@ app.post('/webhook', async (req, res) => {
           answerValue,
           leadPatch: {
             clt_employment_months: months,
+            etapa: 'Em atendimento',
+            status: 'Contato iniciado',
           },
         });
 
