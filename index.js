@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA NA TRIAGEM');
 
 const express = require('express');
 const axios = require('axios');
@@ -130,6 +130,21 @@ function requireBackendApiKey(req, res) {
   return true;
 }
 
+function compactText(value) {
+  return String(value || '')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+}
+
+function cleanExtractedField(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[:\-–—\s]+/, '')
+    .replace(/[:\-–—\s]+$/, '')
+    .trim();
+}
+
 function parseNameCpfFromText(text) {
   const raw = String(text || '').trim();
   const cpfMatch = raw.match(/(\d{3}\.?\d{3}\.?\d{3}-?\d{2})/);
@@ -158,6 +173,118 @@ function parseNameCpfFromText(text) {
   };
 }
 
+function extractLabeledValue(text, labels, stopLabels = []) {
+  const normalizedText = compactText(text);
+
+  if (!normalizedText) return '';
+
+  const escapedLabels = labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const escapedStops = stopLabels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+
+  const stopPattern = escapedStops.length
+    ? `(?=\\n\\s*(?:${escapedStops.join('|')})\\s*[:\\-–—]|$)`
+    : '(?=$)';
+
+  const regex = new RegExp(
+    `(?:^|\\n)\\s*(?:${escapedLabels.join('|')})\\s*[:\\-–—]?\\s*([\\s\\S]*?)${stopPattern}`,
+    'i'
+  );
+
+  const match = normalizedText.match(regex);
+
+  if (!match?.[1]) return '';
+
+  return cleanExtractedField(match[1]);
+}
+
+function parseNameCpfCompanyFromText(text) {
+  const raw = compactText(text);
+
+  const cpfMatch = raw.match(/(\d{3}\.?\d{3}\.?\d{3}-?\d{2})/);
+  const cpf = cpfMatch ? cleanCPF(cpfMatch[1]) : '';
+
+  const nameFromLabel = extractLabeledValue(
+    raw,
+    ['nome completo', 'nome'],
+    ['cpf', 'empresa onde trabalha', 'empresa', 'local de trabalho']
+  );
+
+  const companyFromLabel = extractLabeledValue(
+    raw,
+    ['empresa onde trabalha', 'empresa', 'local de trabalho', 'empresa atual'],
+    ['nome completo', 'nome', 'cpf']
+  );
+
+  let name = nameFromLabel;
+  let company = companyFromLabel;
+
+  if (!name || !company) {
+    const lines = raw
+      .split('\n')
+      .map((line) => cleanExtractedField(line))
+      .filter(Boolean);
+
+    const cleanedLines = lines
+      .map((line) =>
+        line
+          .replace(/^(nome completo|nome|cpf|empresa onde trabalha|empresa|local de trabalho|empresa atual)\s*[:\-–—]?\s*/i, '')
+          .trim()
+      )
+      .filter(Boolean);
+
+    if (!name && cleanedLines.length > 0) {
+      const firstNonCpfLine = cleanedLines.find((line) => cleanCPF(line).length !== 11);
+      if (firstNonCpfLine) {
+        name = firstNonCpfLine;
+      }
+    }
+
+    if (!company && cleanedLines.length > 0) {
+      const possibleCompany = cleanedLines
+        .filter((line) => cleanCPF(line).length !== 11)
+        .filter((line) => line !== name)
+        .pop();
+
+      if (possibleCompany) {
+        company = possibleCompany;
+      }
+    }
+  }
+
+  if (!name) {
+    const fallback = parseNameCpfFromText(raw);
+    name = fallback.name;
+  }
+
+  if (!company) {
+    const withoutCpf = cpfMatch ? raw.replace(cpfMatch[1], '') : raw;
+    const companyKeywordMatch = withoutCpf.match(
+      /(?:empresa onde trabalha|empresa|local de trabalho|empresa atual)\s*[:\-–—]?\s*([^\n]+)/i
+    );
+
+    if (companyKeywordMatch?.[1]) {
+      company = cleanExtractedField(companyKeywordMatch[1]);
+    }
+  }
+
+  name = cleanExtractedField(name)
+    .replace(/^(nome completo|nome)\s*[:\-–—]?\s*/i, '')
+    .trim();
+
+  company = cleanExtractedField(company)
+    .replace(/^(empresa onde trabalha|empresa|local de trabalho|empresa atual)\s*[:\-–—]?\s*/i, '')
+    .trim();
+
+  if (name.length < 2) name = '';
+  if (company.length < 2) company = '';
+
+  return {
+    name,
+    cpf: cpf.length === 11 ? cpf : '',
+    company,
+  };
+}
+
 function stripBrazilCountryCode(phone) {
   const normalized = normalizePhone(phone);
 
@@ -177,8 +304,6 @@ function buildBrazilMobileVariants(phone) {
 
   variants.add(local);
 
-  // Caso sem nono dígito: DDD + 8 dígitos. Ex: 86 95307196.
-  // Gera DDD + 9 + 8 dígitos. Ex: 86 995307196.
   if (local.length === 10) {
     const ddd = local.slice(0, 2);
     const subscriber = local.slice(2);
@@ -188,8 +313,6 @@ function buildBrazilMobileVariants(phone) {
     }
   }
 
-  // Caso com nono dígito: DDD + 9 + 8 dígitos. Ex: 86 995307196.
-  // Gera DDD + 8 dígitos. Ex: 86 95307196.
   if (local.length === 11 && local[2] === '9') {
     const ddd = local.slice(0, 2);
     const subscriberWithoutNine = local.slice(3);
@@ -199,7 +322,6 @@ function buildBrazilMobileVariants(phone) {
     }
   }
 
-  // Em alguns casos pode chegar sem DDD, só 8 ou 9 dígitos.
   if (local.length === 9 && local[0] === '9') {
     variants.add(local.slice(1));
   }
@@ -323,8 +445,6 @@ function getPhoneMatchScore(incomingPhone, savedPhone) {
 
   if (incomingLocal === savedLocal) return 96;
 
-  // Regra brasileira: compara DDD + últimos 8 dígitos.
-  // Ex: 8695307196 e 86995307196 devem casar pelo DDD 86 + 95307196.
   const incomingDdd = incomingLocal.length >= 10 ? incomingLocal.slice(0, 2) : '';
   const savedDdd = savedLocal.length >= 10 ? savedLocal.slice(0, 2) : '';
   const incomingLast8 = incomingLocal.length >= 8 ? incomingLocal.slice(-8) : '';
@@ -751,13 +871,13 @@ async function markLeadReadyForPresimulationByPhone(phone, messageText) {
     return null;
   }
 
-  const parsed = parseNameCpfFromText(messageText);
+  const parsed = parseNameCpfCompanyFromText(messageText);
 
   await saveLeadTriageAnswer({
     leadId: lead.id,
     phone: normalizedPhone,
-    questionKey: 'nome_cpf',
-    questionText: 'Informe nome e CPF para simulação',
+    questionKey: 'dados_finais_pre_simulacao',
+    questionText: 'Informe nome completo, CPF e empresa onde trabalha para simulação',
     answerValue: messageText,
   });
 
@@ -775,6 +895,11 @@ async function markLeadReadyForPresimulationByPhone(phone, messageText) {
 
   if (parsed.cpf) {
     patch.cpf = parsed.cpf;
+  }
+
+  if (parsed.company) {
+    patch.clt_company_name = parsed.company;
+    patch.empresa = parsed.company;
   }
 
   await updateLeadFields(lead.id, patch);
@@ -1714,11 +1839,10 @@ app.post('/webhook', async (req, res) => {
 
         conversationState[phone] = 'aguardando_dados';
 
-        const ok = await sendTemplateFlow(phone, 'resposta_button_112_113');
-
-        if (!ok) {
-          await sendText(phone, 'Me informe Nome completo e CPF para eu seguir com a análise.');
-        }
+        await sendText(
+          phone,
+          'Perfeito. Para eu seguir com a análise, me envie seus dados neste formato:\n\nNome completo:\nCPF:\nEmpresa onde trabalha:'
+        );
 
         return res.sendStatus(200);
       }
