@@ -1,10 +1,10 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + BUSCA INTELIGENTE POR TELEFONE');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + BUSCA INTELIGENTE POR TELEFONE V2');
 
 const express = require('express');
 const axios = require('axios');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // ========================
 // CORS
@@ -58,16 +58,6 @@ function getSupabaseHeaders() {
     Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
     'Content-Type': 'application/json',
   };
-}
-
-function getSupabaseHeadersWithPrefer(prefer) {
-  const headers = getSupabaseHeaders();
-
-  if (prefer) {
-    headers.Prefer = prefer;
-  }
-
-  return headers;
 }
 
 function normalizePhone(phone) {
@@ -194,12 +184,20 @@ function buildPhoneVariants(phone) {
     variants.add(normalized.slice(-10));
   }
 
+  if (normalized.length >= 9) {
+    variants.add(normalized.slice(-9));
+  }
+
   if (without55.length >= 11) {
     variants.add(without55.slice(-11));
   }
 
   if (without55.length >= 10) {
     variants.add(without55.slice(-10));
+  }
+
+  if (without55.length >= 9) {
+    variants.add(without55.slice(-9));
   }
 
   return Array.from(variants).filter(Boolean);
@@ -216,6 +214,7 @@ function getWebhookPhone(data) {
       data?.sender ||
       data?.participantPhone ||
       data?.connectedPhone ||
+      data?.chatId ||
       ''
   );
 }
@@ -238,8 +237,64 @@ function getWebhookText(data) {
     data?.body ||
     data?.buttonsResponseMessage?.message ||
     data?.buttonsResponseMessage?.buttonText ||
+    data?.buttonsResponseMessage?.selectedDisplayText ||
     ''
   );
+}
+
+function getPhoneMatchScore(incomingPhone, savedPhone) {
+  const incoming = normalizePhone(incomingPhone);
+  const saved = normalizePhone(savedPhone);
+
+  if (!incoming || !saved) return 0;
+
+  const incomingVariants = buildPhoneVariants(incoming);
+  const savedVariants = buildPhoneVariants(saved);
+
+  if (incoming === saved) return 100;
+
+  for (const incomingVariant of incomingVariants) {
+    for (const savedVariant of savedVariants) {
+      if (!incomingVariant || !savedVariant) continue;
+
+      if (incomingVariant === savedVariant) {
+        if (incomingVariant.length >= 11) return 95;
+        if (incomingVariant.length >= 10) return 90;
+        if (incomingVariant.length >= 9) return 75;
+      }
+    }
+  }
+
+  const incomingWithout55 = incoming.startsWith('55') ? incoming.slice(2) : incoming;
+  const savedWithout55 = saved.startsWith('55') ? saved.slice(2) : saved;
+
+  if (incomingWithout55 === savedWithout55) return 92;
+
+  if (
+    incomingWithout55.length >= 11 &&
+    savedWithout55.length >= 11 &&
+    incomingWithout55.slice(-11) === savedWithout55.slice(-11)
+  ) {
+    return 88;
+  }
+
+  if (
+    incomingWithout55.length >= 10 &&
+    savedWithout55.length >= 10 &&
+    incomingWithout55.slice(-10) === savedWithout55.slice(-10)
+  ) {
+    return 82;
+  }
+
+  if (
+    incomingWithout55.length >= 9 &&
+    savedWithout55.length >= 9 &&
+    incomingWithout55.slice(-9) === savedWithout55.slice(-9)
+  ) {
+    return 70;
+  }
+
+  return 0;
 }
 
 // ========================
@@ -278,22 +333,23 @@ async function getLeadByPhone(phone) {
 
   const variants = buildPhoneVariants(normalizedPhone);
 
-  console.log('🔎 Buscando lead por telefone. Variantes:', variants);
+  console.log('🔎 Buscando lead por telefone. Entrada:', normalizedPhone, 'Variantes:', variants);
 
+  // 1) Busca exata por telefone salvo sem máscara.
   try {
     const exactResponse = await axios.get(
       `${SUPABASE_URL}/rest/v1/leads?telefone=in.${buildSupabaseInList(
         variants
-      )}&select=*&order=created_at.desc&limit=10`,
+      )}&select=*&order=created_at.desc&limit=20`,
       { headers: getSupabaseHeaders() }
     );
 
     const exactRows = Array.isArray(exactResponse.data) ? exactResponse.data : [];
 
     if (exactRows.length > 0) {
-      console.log('✅ Lead encontrado por telefone exato:', {
+      console.log('✅ Lead encontrado por busca exata:', {
         leadId: exactRows[0].id,
-        telefone: exactRows[0].telefone,
+        telefoneSalvo: exactRows[0].telefone,
       });
 
       return exactRows[0];
@@ -302,8 +358,9 @@ async function getLeadByPhone(phone) {
     console.warn('⚠️ Busca exata por telefone falhou:', error.response?.data || error.message);
   }
 
+  // 2) Busca por final de telefone em texto bruto.
   const orderedVariants = variants
-    .filter((variant) => variant.length >= 10)
+    .filter((variant) => variant.length >= 9)
     .sort((a, b) => b.length - a.length);
 
   for (const variant of orderedVariants) {
@@ -311,31 +368,80 @@ async function getLeadByPhone(phone) {
       const response = await axios.get(
         `${SUPABASE_URL}/rest/v1/leads?telefone=ilike.*${encodeURIComponent(
           variant
-        )}&select=*&order=created_at.desc&limit=10`,
+        )}*&select=*&order=created_at.desc&limit=20`,
         { headers: getSupabaseHeaders() }
       );
 
       const rows = Array.isArray(response.data) ? response.data : [];
 
       if (rows.length > 0) {
-        console.log('✅ Lead encontrado por final de telefone:', {
-          leadId: rows[0].id,
-          telefone: rows[0].telefone,
-          variante: variant,
-        });
+        const rankedRows = rows
+          .map((row) => ({
+            row,
+            score: getPhoneMatchScore(normalizedPhone, row.telefone),
+          }))
+          .filter((item) => item.score > 0)
+          .sort((a, b) => b.score - a.score);
 
-        return rows[0];
+        if (rankedRows.length > 0) {
+          console.log('✅ Lead encontrado por ilike + score:', {
+            leadId: rankedRows[0].row.id,
+            telefoneSalvo: rankedRows[0].row.telefone,
+            variante: variant,
+            score: rankedRows[0].score,
+          });
+
+          return rankedRows[0].row;
+        }
       }
     } catch (error) {
       console.warn(
-        '⚠️ Busca por final de telefone falhou:',
+        '⚠️ Busca por ilike telefone falhou:',
         variant,
         error.response?.data || error.message
       );
     }
   }
 
-  console.log('ℹ️ Nenhum lead encontrado para telefone:', normalizedPhone);
+  // 3) Fallback robusto:
+  // Busca uma janela de leads recentes e compara os telefones normalizados em JS.
+  // Isso resolve casos com máscara, espaço, hífen, parênteses, +55, 55, sem 55 etc.
+  try {
+    const fallbackResponse = await axios.get(
+      `${SUPABASE_URL}/rest/v1/leads?select=*&order=created_at.desc&limit=3000`,
+      { headers: getSupabaseHeaders() }
+    );
+
+    const candidates = Array.isArray(fallbackResponse.data) ? fallbackResponse.data : [];
+
+    const matches = candidates
+      .map((lead) => ({
+        lead,
+        score: getPhoneMatchScore(normalizedPhone, lead.telefone),
+      }))
+      .filter((item) => item.score >= 70)
+      .sort((a, b) => b.score - a.score);
+
+    if (matches.length > 0) {
+      console.log('✅ Lead encontrado por fallback JS normalizado:', {
+        leadId: matches[0].lead.id,
+        telefoneSalvo: matches[0].lead.telefone,
+        score: matches[0].score,
+        totalMatches: matches.length,
+      });
+
+      return matches[0].lead;
+    }
+
+    console.log('⚠️ Fallback JS não encontrou lead compatível:', {
+      entrada: normalizedPhone,
+      candidatosVerificados: candidates.length,
+    });
+  } catch (error) {
+    console.warn('⚠️ Fallback JS por telefone falhou:', error.response?.data || error.message);
+  }
+
+  console.log('❌ Nenhum lead encontrado para telefone:', normalizedPhone);
 
   return null;
 }
@@ -431,6 +537,11 @@ async function updateLeadFields(leadId, fields) {
     { headers: getSupabaseHeaders() }
   );
 
+  console.log('✅ Lead atualizado:', {
+    leadId: normalizedLeadId,
+    fields: safeFields,
+  });
+
   return safeFields;
 }
 
@@ -442,7 +553,7 @@ async function markClientInteractionByPhone(phone, messageText = '') {
   const lead = await getLeadByPhone(normalizedPhone);
 
   if (!lead) {
-    console.log('ℹ️ Interação recebida, mas lead não encontrado:', normalizedPhone);
+    console.log('⚠️ Interação recebida, mas lead não encontrado:', normalizedPhone);
     return null;
   }
 
@@ -517,7 +628,17 @@ async function saveTriageByPhone({
     answerValue,
   });
 
-  if (lead?.id && Object.keys(leadPatch).length > 0) {
+  if (!lead?.id) {
+    console.log('❌ Triagem salva sem lead_id porque lead não foi encontrado:', {
+      phone: normalizedPhone,
+      questionKey,
+      answerValue,
+    });
+
+    return null;
+  }
+
+  if (Object.keys(leadPatch).length > 0) {
     await updateLeadFields(lead.id, leadPatch);
   }
 
@@ -841,6 +962,7 @@ async function sendTemplateFlow(phone, templateKey) {
   const template = await getTemplateByKey(templateKey);
 
   if (!template) {
+    console.log('⚠️ Template de fluxo não encontrado:', templateKey);
     return false;
   }
 
@@ -1371,7 +1493,16 @@ app.post('/webhook', async (req, res) => {
     const buttonId = getWebhookButtonId(data);
     const textMessage = getWebhookText(data);
 
+    console.log('📥 WEBHOOK RECEBIDO:', {
+      phone,
+      buttonId,
+      textMessage,
+      hasButtonsResponseMessage: Boolean(data?.buttonsResponseMessage),
+      type: data?.type || data?.event || null,
+    });
+
     if (!phone) {
+      console.log('⚠️ Webhook sem telefone identificável.');
       return res.sendStatus(200);
     }
 
@@ -1550,6 +1681,7 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
+      console.log('ℹ️ Botão recebido sem regra mapeada:', buttonId);
       return res.sendStatus(200);
     }
 
@@ -1567,6 +1699,12 @@ app.post('/webhook', async (req, res) => {
       conversationState[phone] = 'humano';
       return res.sendStatus(200);
     }
+
+    console.log('ℹ️ Mensagem recebida sem botão e sem estado aguardando dados:', {
+      phone,
+      state: conversationState[phone] || null,
+      textMessage,
+    });
 
     return res.sendStatus(200);
   } catch (error) {
