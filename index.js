@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA NA TRIAGEM');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO');
 
 const express = require('express');
 const axios = require('axios');
@@ -197,22 +197,93 @@ function extractLabeledValue(text, labels, stopLabels = []) {
   return cleanExtractedField(match[1]);
 }
 
-function parseNameCpfCompanyFromText(text) {
+function parseBirthDateFromText(text) {
+  const raw = compactText(text);
+
+  const labeledBirthDate = extractLabeledValue(
+    raw,
+    ['data de nascimento', 'nascimento', 'data nascimento', 'dt nascimento'],
+    ['nome completo', 'nome', 'cpf', 'empresa onde trabalha', 'empresa', 'local de trabalho', 'empresa atual']
+  );
+
+  const birthDateSource = labeledBirthDate || raw;
+  const match = birthDateSource.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})\b/);
+
+  if (!match) {
+    return {
+      birthDate: '',
+      age: null,
+    };
+  }
+
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+
+  if (!day || !month || !year || month < 1 || month > 12 || day < 1 || day > 31) {
+    return {
+      birthDate: '',
+      age: null,
+    };
+  }
+
+  const birthDate = new Date(year, month - 1, day);
+
+  if (
+    Number.isNaN(birthDate.getTime()) ||
+    birthDate.getFullYear() !== year ||
+    birthDate.getMonth() !== month - 1 ||
+    birthDate.getDate() !== day
+  ) {
+    return {
+      birthDate: '',
+      age: null,
+    };
+  }
+
+  const today = new Date();
+
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  const dayDiff = today.getDate() - birthDate.getDate();
+
+  if (monthDiff < 0 || (monthDiff === 0 && dayDiff < 0)) {
+    age -= 1;
+  }
+
+  if (age < 14 || age > 100) {
+    return {
+      birthDate: '',
+      age: null,
+    };
+  }
+
+  const isoBirthDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+  return {
+    birthDate: isoBirthDate,
+    age,
+  };
+}
+
+function parseNameCpfCompanyBirthDateFromText(text) {
   const raw = compactText(text);
 
   const cpfMatch = raw.match(/(\d{3}\.?\d{3}\.?\d{3}-?\d{2})/);
   const cpf = cpfMatch ? cleanCPF(cpfMatch[1]) : '';
 
+  const birthDateResult = parseBirthDateFromText(raw);
+
   const nameFromLabel = extractLabeledValue(
     raw,
     ['nome completo', 'nome'],
-    ['cpf', 'empresa onde trabalha', 'empresa', 'local de trabalho']
+    ['cpf', 'data de nascimento', 'nascimento', 'data nascimento', 'empresa onde trabalha', 'empresa', 'local de trabalho']
   );
 
   const companyFromLabel = extractLabeledValue(
     raw,
     ['empresa onde trabalha', 'empresa', 'local de trabalho', 'empresa atual'],
-    ['nome completo', 'nome', 'cpf']
+    ['nome completo', 'nome', 'cpf', 'data de nascimento', 'nascimento', 'data nascimento']
   );
 
   let name = nameFromLabel;
@@ -227,21 +298,30 @@ function parseNameCpfCompanyFromText(text) {
     const cleanedLines = lines
       .map((line) =>
         line
-          .replace(/^(nome completo|nome|cpf|empresa onde trabalha|empresa|local de trabalho|empresa atual)\s*[:\-–—]?\s*/i, '')
+          .replace(
+            /^(nome completo|nome|cpf|data de nascimento|nascimento|data nascimento|empresa onde trabalha|empresa|local de trabalho|empresa atual)\s*[:\-–—]?\s*/i,
+            ''
+          )
           .trim()
       )
       .filter(Boolean);
 
     if (!name && cleanedLines.length > 0) {
-      const firstNonCpfLine = cleanedLines.find((line) => cleanCPF(line).length !== 11);
-      if (firstNonCpfLine) {
-        name = firstNonCpfLine;
+      const firstNameLine = cleanedLines.find((line) => {
+        const isCpf = cleanCPF(line).length === 11;
+        const hasBirthDate = /\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4}\b/.test(line);
+        return !isCpf && !hasBirthDate;
+      });
+
+      if (firstNameLine) {
+        name = firstNameLine;
       }
     }
 
     if (!company && cleanedLines.length > 0) {
       const possibleCompany = cleanedLines
         .filter((line) => cleanCPF(line).length !== 11)
+        .filter((line) => !/\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4}\b/.test(line))
         .filter((line) => line !== name)
         .pop();
 
@@ -258,7 +338,8 @@ function parseNameCpfCompanyFromText(text) {
 
   if (!company) {
     const withoutCpf = cpfMatch ? raw.replace(cpfMatch[1], '') : raw;
-    const companyKeywordMatch = withoutCpf.match(
+    const withoutBirthDate = withoutCpf.replace(/\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4}\b/g, '');
+    const companyKeywordMatch = withoutBirthDate.match(
       /(?:empresa onde trabalha|empresa|local de trabalho|empresa atual)\s*[:\-–—]?\s*([^\n]+)/i
     );
 
@@ -281,6 +362,8 @@ function parseNameCpfCompanyFromText(text) {
   return {
     name,
     cpf: cpf.length === 11 ? cpf : '',
+    birthDate: birthDateResult.birthDate,
+    age: birthDateResult.age,
     company,
   };
 }
@@ -871,13 +954,13 @@ async function markLeadReadyForPresimulationByPhone(phone, messageText) {
     return null;
   }
 
-  const parsed = parseNameCpfCompanyFromText(messageText);
+  const parsed = parseNameCpfCompanyBirthDateFromText(messageText);
 
   await saveLeadTriageAnswer({
     leadId: lead.id,
     phone: normalizedPhone,
     questionKey: 'dados_finais_pre_simulacao',
-    questionText: 'Informe nome completo, CPF e empresa onde trabalha para simulação',
+    questionText: 'Informe nome completo, CPF, data de nascimento e empresa onde trabalha para simulação',
     answerValue: messageText,
   });
 
@@ -895,6 +978,10 @@ async function markLeadReadyForPresimulationByPhone(phone, messageText) {
 
   if (parsed.cpf) {
     patch.cpf = parsed.cpf;
+  }
+
+  if (typeof parsed.age === 'number') {
+    patch.clt_age = parsed.age;
   }
 
   if (parsed.company) {
@@ -1837,11 +1924,42 @@ app.post('/webhook', async (req, res) => {
           },
         });
 
+        conversationState[phone] = 'aguardando_consignado';
+
+        await sendButtonList(
+          phone,
+          'Perfeito. Antes de finalizar a pré-análise, me confirma:\n\nVocê já possui consignado ativo?',
+          [
+            { id: '114', label: 'Sim, possuo' },
+            { id: '115', label: 'Não possuo' },
+          ]
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if (buttonId === '114' || buttonId === '115') {
+        const hasActiveLoan = buttonId === '114';
+
+        await saveTriageByPhone({
+          phone,
+          questionKey: 'clt_has_active_loan',
+          questionText: 'Cliente possui consignado ativo?',
+          answerValue: hasActiveLoan ? 'sim' : 'nao',
+          leadPatch: {
+            clt_has_active_loan: hasActiveLoan,
+            etapa: STAGE_IN_ATTENDANCE,
+            status: STATUS_IN_ATTENDANCE,
+            is_archived: false,
+            clt_ready_for_presimulation: false,
+          },
+        });
+
         conversationState[phone] = 'aguardando_dados';
 
         await sendText(
           phone,
-          'Perfeito. Para eu seguir com a análise, me envie seus dados neste formato:\n\nNome completo:\nCPF:\nEmpresa onde trabalha:'
+          'Perfeito. Para eu seguir com a análise, me envie seus dados neste formato:\n\nNome completo:\nCPF:\nData de nascimento:\nEmpresa onde trabalha:'
         );
 
         return res.sendStatus(200);
