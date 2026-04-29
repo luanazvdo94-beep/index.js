@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + BUSCA INTELIGENTE POR TELEFONE V2');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3');
 
 const express = require('express');
 const axios = require('axios');
@@ -158,6 +158,59 @@ function parseNameCpfFromText(text) {
   };
 }
 
+function stripBrazilCountryCode(phone) {
+  const normalized = normalizePhone(phone);
+
+  if (normalized.startsWith('55') && normalized.length > 11) {
+    return normalized.slice(2);
+  }
+
+  return normalized;
+}
+
+function buildBrazilMobileVariants(phone) {
+  const raw = normalizePhone(phone);
+  const local = stripBrazilCountryCode(raw);
+  const variants = new Set();
+
+  if (!local) return [];
+
+  variants.add(local);
+
+  // Caso sem nono dígito: DDD + 8 dígitos. Ex: 86 95307196.
+  // Gera DDD + 9 + 8 dígitos. Ex: 86 995307196.
+  if (local.length === 10) {
+    const ddd = local.slice(0, 2);
+    const subscriber = local.slice(2);
+
+    if (subscriber.length === 8) {
+      variants.add(`${ddd}9${subscriber}`);
+    }
+  }
+
+  // Caso com nono dígito: DDD + 9 + 8 dígitos. Ex: 86 995307196.
+  // Gera DDD + 8 dígitos. Ex: 86 95307196.
+  if (local.length === 11 && local[2] === '9') {
+    const ddd = local.slice(0, 2);
+    const subscriberWithoutNine = local.slice(3);
+
+    if (subscriberWithoutNine.length === 8) {
+      variants.add(`${ddd}${subscriberWithoutNine}`);
+    }
+  }
+
+  // Em alguns casos pode chegar sem DDD, só 8 ou 9 dígitos.
+  if (local.length === 9 && local[0] === '9') {
+    variants.add(local.slice(1));
+  }
+
+  if (local.length === 8) {
+    variants.add(`9${local}`);
+  }
+
+  return Array.from(variants).filter(Boolean);
+}
+
 function buildPhoneVariants(phone) {
   const normalized = normalizePhone(phone);
   const variants = new Set();
@@ -165,6 +218,21 @@ function buildPhoneVariants(phone) {
   if (!normalized) return [];
 
   variants.add(normalized);
+
+  const local = stripBrazilCountryCode(normalized);
+  const brVariants = buildBrazilMobileVariants(local);
+
+  variants.add(local);
+
+  for (const brVariant of brVariants) {
+    variants.add(brVariant);
+    variants.add(`55${brVariant}`);
+
+    if (brVariant.length >= 11) variants.add(brVariant.slice(-11));
+    if (brVariant.length >= 10) variants.add(brVariant.slice(-10));
+    if (brVariant.length >= 9) variants.add(brVariant.slice(-9));
+    if (brVariant.length >= 8) variants.add(brVariant.slice(-8));
+  }
 
   if (normalized.startsWith('55') && normalized.length > 11) {
     variants.add(normalized.slice(2));
@@ -174,31 +242,15 @@ function buildPhoneVariants(phone) {
     variants.add(`55${normalized}`);
   }
 
-  const without55 = normalized.startsWith('55') ? normalized.slice(2) : normalized;
+  if (normalized.length >= 11) variants.add(normalized.slice(-11));
+  if (normalized.length >= 10) variants.add(normalized.slice(-10));
+  if (normalized.length >= 9) variants.add(normalized.slice(-9));
+  if (normalized.length >= 8) variants.add(normalized.slice(-8));
 
-  if (normalized.length >= 11) {
-    variants.add(normalized.slice(-11));
-  }
-
-  if (normalized.length >= 10) {
-    variants.add(normalized.slice(-10));
-  }
-
-  if (normalized.length >= 9) {
-    variants.add(normalized.slice(-9));
-  }
-
-  if (without55.length >= 11) {
-    variants.add(without55.slice(-11));
-  }
-
-  if (without55.length >= 10) {
-    variants.add(without55.slice(-10));
-  }
-
-  if (without55.length >= 9) {
-    variants.add(without55.slice(-9));
-  }
+  if (local.length >= 11) variants.add(local.slice(-11));
+  if (local.length >= 10) variants.add(local.slice(-10));
+  if (local.length >= 9) variants.add(local.slice(-9));
+  if (local.length >= 8) variants.add(local.slice(-8));
 
   return Array.from(variants).filter(Boolean);
 }
@@ -258,40 +310,67 @@ function getPhoneMatchScore(incomingPhone, savedPhone) {
       if (!incomingVariant || !savedVariant) continue;
 
       if (incomingVariant === savedVariant) {
-        if (incomingVariant.length >= 11) return 95;
-        if (incomingVariant.length >= 10) return 90;
-        if (incomingVariant.length >= 9) return 75;
+        if (incomingVariant.length >= 11) return 98;
+        if (incomingVariant.length >= 10) return 95;
+        if (incomingVariant.length >= 9) return 88;
+        if (incomingVariant.length >= 8) return 80;
       }
     }
   }
 
-  const incomingWithout55 = incoming.startsWith('55') ? incoming.slice(2) : incoming;
-  const savedWithout55 = saved.startsWith('55') ? saved.slice(2) : saved;
+  const incomingLocal = stripBrazilCountryCode(incoming);
+  const savedLocal = stripBrazilCountryCode(saved);
 
-  if (incomingWithout55 === savedWithout55) return 92;
+  if (incomingLocal === savedLocal) return 96;
+
+  // Regra brasileira: compara DDD + últimos 8 dígitos.
+  // Ex: 8695307196 e 86995307196 devem casar pelo DDD 86 + 95307196.
+  const incomingDdd = incomingLocal.length >= 10 ? incomingLocal.slice(0, 2) : '';
+  const savedDdd = savedLocal.length >= 10 ? savedLocal.slice(0, 2) : '';
+  const incomingLast8 = incomingLocal.length >= 8 ? incomingLocal.slice(-8) : '';
+  const savedLast8 = savedLocal.length >= 8 ? savedLocal.slice(-8) : '';
 
   if (
-    incomingWithout55.length >= 11 &&
-    savedWithout55.length >= 11 &&
-    incomingWithout55.slice(-11) === savedWithout55.slice(-11)
+    incomingDdd &&
+    savedDdd &&
+    incomingDdd === savedDdd &&
+    incomingLast8 &&
+    savedLast8 &&
+    incomingLast8 === savedLast8
   ) {
-    return 88;
+    return 93;
   }
 
   if (
-    incomingWithout55.length >= 10 &&
-    savedWithout55.length >= 10 &&
-    incomingWithout55.slice(-10) === savedWithout55.slice(-10)
+    incomingLocal.length >= 11 &&
+    savedLocal.length >= 11 &&
+    incomingLocal.slice(-11) === savedLocal.slice(-11)
   ) {
-    return 82;
+    return 90;
   }
 
   if (
-    incomingWithout55.length >= 9 &&
-    savedWithout55.length >= 9 &&
-    incomingWithout55.slice(-9) === savedWithout55.slice(-9)
+    incomingLocal.length >= 10 &&
+    savedLocal.length >= 10 &&
+    incomingLocal.slice(-10) === savedLocal.slice(-10)
   ) {
-    return 70;
+    return 85;
+  }
+
+  if (
+    incomingLocal.length >= 9 &&
+    savedLocal.length >= 9 &&
+    incomingLocal.slice(-9) === savedLocal.slice(-9)
+  ) {
+    return 75;
+  }
+
+  if (
+    incomingLocal.length >= 8 &&
+    savedLocal.length >= 8 &&
+    incomingLocal.slice(-8) === savedLocal.slice(-8)
+  ) {
+    return 65;
   }
 
   return 0;
@@ -335,7 +414,6 @@ async function getLeadByPhone(phone) {
 
   console.log('🔎 Buscando lead por telefone. Entrada:', normalizedPhone, 'Variantes:', variants);
 
-  // 1) Busca exata por telefone salvo sem máscara.
   try {
     const exactResponse = await axios.get(
       `${SUPABASE_URL}/rest/v1/leads?telefone=in.${buildSupabaseInList(
@@ -347,20 +425,27 @@ async function getLeadByPhone(phone) {
     const exactRows = Array.isArray(exactResponse.data) ? exactResponse.data : [];
 
     if (exactRows.length > 0) {
+      const rankedRows = exactRows
+        .map((row) => ({
+          row,
+          score: getPhoneMatchScore(normalizedPhone, row.telefone),
+        }))
+        .sort((a, b) => b.score - a.score);
+
       console.log('✅ Lead encontrado por busca exata:', {
-        leadId: exactRows[0].id,
-        telefoneSalvo: exactRows[0].telefone,
+        leadId: rankedRows[0].row.id,
+        telefoneSalvo: rankedRows[0].row.telefone,
+        score: rankedRows[0].score,
       });
 
-      return exactRows[0];
+      return rankedRows[0].row;
     }
   } catch (error) {
     console.warn('⚠️ Busca exata por telefone falhou:', error.response?.data || error.message);
   }
 
-  // 2) Busca por final de telefone em texto bruto.
   const orderedVariants = variants
-    .filter((variant) => variant.length >= 9)
+    .filter((variant) => variant.length >= 8)
     .sort((a, b) => b.length - a.length);
 
   for (const variant of orderedVariants) {
@@ -380,7 +465,7 @@ async function getLeadByPhone(phone) {
             row,
             score: getPhoneMatchScore(normalizedPhone, row.telefone),
           }))
-          .filter((item) => item.score > 0)
+          .filter((item) => item.score >= 65)
           .sort((a, b) => b.score - a.score);
 
         if (rankedRows.length > 0) {
@@ -403,9 +488,6 @@ async function getLeadByPhone(phone) {
     }
   }
 
-  // 3) Fallback robusto:
-  // Busca uma janela de leads recentes e compara os telefones normalizados em JS.
-  // Isso resolve casos com máscara, espaço, hífen, parênteses, +55, 55, sem 55 etc.
   try {
     const fallbackResponse = await axios.get(
       `${SUPABASE_URL}/rest/v1/leads?select=*&order=created_at.desc&limit=3000`,
@@ -419,7 +501,7 @@ async function getLeadByPhone(phone) {
         lead,
         score: getPhoneMatchScore(normalizedPhone, lead.telefone),
       }))
-      .filter((item) => item.score >= 70)
+      .filter((item) => item.score >= 65)
       .sort((a, b) => b.score - a.score);
 
     if (matches.length > 0) {
@@ -658,31 +740,6 @@ async function getLeadTriageAnswers(leadId) {
   );
 
   return Array.isArray(response.data) ? response.data : [];
-}
-
-async function moveLeadToKanbanStageByPhone(phone, stage, status) {
-  const normalizedPhone = normalizePhone(phone);
-  const lead = await getLeadByPhone(normalizedPhone);
-
-  if (!lead) {
-    console.log('ℹ️ Lead não encontrado para mover etapa:', normalizedPhone, stage);
-    return null;
-  }
-
-  await updateLeadFields(lead.id, {
-    etapa: stage,
-    status,
-    is_archived: false,
-  });
-
-  console.log('✅ Lead movido automaticamente no Kanban:', {
-    leadId: lead.id,
-    phone: normalizedPhone,
-    etapa: stage,
-    status,
-  });
-
-  return lead;
 }
 
 async function markLeadReadyForPresimulationByPhone(phone, messageText) {
@@ -1232,9 +1289,6 @@ app.get('/lead-presimulation/:leadId', async (req, res) => {
 
 // ========================
 // DISPARO USADO PELO CRM / ABA DE DISPARO / FUNIL
-// IMPORTANTE:
-// Disparo feito NÃO coloca automaticamente o lead no Kanban.
-// O Kanban só muda quando o cliente responde a triagem.
 // ========================
 app.post('/send-indication-message', async (req, res) => {
   try {
@@ -1513,8 +1567,6 @@ app.post('/webhook', async (req, res) => {
     await markClientInteractionByPhone(phone, inboundMessage);
 
     if (buttonId) {
-      // PRIMEIRA RESPOSTA POSITIVA:
-      // cliente entra no Kanban como Novo lead.
       if (buttonId === '1') {
         await saveTriageByPhone({
           phone,
@@ -1545,8 +1597,6 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // RESPOSTA NEGATIVA:
-      // não deve colocar o lead em atendimento.
       if (buttonId === '2') {
         await saveTriageByPhone({
           phone,
@@ -1568,8 +1618,6 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // SEGUNDA RESPOSTA POSITIVA:
-      // cliente muda para Em atendimento.
       if (buttonId === '11') {
         await saveTriageByPhone({
           phone,
@@ -1602,8 +1650,6 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // NÃO ESTÁ TRABALHANDO:
-      // mantém fora da pré-simulação.
       if (buttonId === '12') {
         await saveTriageByPhone({
           phone,
@@ -1626,8 +1672,6 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // TEMPO DE EMPRESA INSUFICIENTE:
-      // não vai para pré-simulação.
       if (buttonId === '111') {
         await saveTriageByPhone({
           phone,
@@ -1650,8 +1694,6 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // TEMPO DE EMPRESA ELEGÍVEL:
-      // permanece em atendimento e aguarda nome/CPF.
       if (buttonId === '112' || buttonId === '113') {
         const months = buttonId === '112' ? 6 : 12;
         const answerValue = buttonId === '112' ? '3_a_12_meses' : 'acima_12_meses';
@@ -1685,8 +1727,6 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // NOME/CPF RECEBIDO:
-    // conclui triagem, move para Em proposta e libera Pré-simular.
     if (conversationState[phone] === 'aguardando_dados' && textMessage.trim()) {
       await markLeadReadyForPresimulationByPhone(phone, textMessage);
 
