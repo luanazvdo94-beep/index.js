@@ -1460,13 +1460,6 @@ async function sendLeadOffersCarousel({ lead, offers }) {
   const carousel = offers.map((offer) => {
     const card = {
       text: buildOfferCarouselText(offer),
-      buttons: [
-        {
-          id: offer.zapi_button_id,
-          label: `Escolher Oferta ${offer.offer_number}`,
-          type: 'REPLY',
-        },
-      ],
     };
 
     if (NUMON_OFFER_IMAGE_URL) {
