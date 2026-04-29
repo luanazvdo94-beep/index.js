@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS');
 
 const express = require('express');
 const axios = require('axios');
@@ -634,9 +634,6 @@ function buildOfferCarouselText(offer) {
     lines.push('');
     lines.push(`Observação: ${offer.description}`);
   }
-
-  lines.push('');
-  lines.push('Toque abaixo para escolher esta opção.');
 
   return lines.join('\n');
 }
@@ -1454,31 +1451,46 @@ async function sendTemplateFlow(phone, templateKey) {
 }
 
 async function sendLeadOffersCarousel({ lead, offers }) {
-  if (!NUMON_OFFER_IMAGE_URL) {
-    throw new Error('NUMON_OFFER_IMAGE_URL não configurada no Railway');
-  }
-
   const phone = normalizePhone(lead.telefone);
 
   if (!phone) {
     throw new Error('Lead sem telefone válido');
   }
 
-  const carousel = offers.map((offer) => ({
-    text: buildOfferCarouselText(offer),
-    image: NUMON_OFFER_IMAGE_URL,
-    buttons: [
-      {
-        id: offer.zapi_button_id,
-        label: `Escolher Oferta ${offer.offer_number}`,
-        type: 'REPLY',
-      },
-    ],
-  }));
+  const carousel = offers.map((offer) => {
+    const card = {
+      text: buildOfferCarouselText(offer),
+      buttons: [
+        {
+          id: offer.zapi_button_id,
+          label: `Escolher Oferta ${offer.offer_number}`,
+          type: 'REPLY',
+        },
+      ],
+    };
 
-  const message = `Olá${lead.nome ? `, ${lead.nome}` : ''}. Seguem as opções simuladas para você analisar. Escolha a oferta que fizer mais sentido para seguirmos com a proposta.`;
+    if (NUMON_OFFER_IMAGE_URL) {
+      card.image = NUMON_OFFER_IMAGE_URL;
+    }
+
+    return card;
+  });
+
+  const message = `Olá${lead.nome ? `, ${lead.nome}` : ''}. Seguem as opções simuladas para você analisar.`;
 
   await sendCarousel(phone, message, carousel);
+
+  const choiceButtons = offers.map((offer) => ({
+    id: offer.zapi_button_id,
+    label: `Escolher Oferta ${offer.offer_number}`,
+  }));
+
+  await sendButtonList(
+    phone,
+    'Escolha abaixo qual proposta deseja seguir:',
+    choiceButtons,
+    lead.id
+  );
 
   const logText = [
     '[OFERTAS ENVIADAS]',
@@ -1780,7 +1792,7 @@ app.post('/send-indication-message', async (req, res) => {
 });
 
 // ========================
-// OFERTAS - ENVIO DE CARROSSEL
+// OFERTAS - ENVIO DE CARROSSEL + BOTÕES FUNCIONAIS
 // ========================
 app.post('/send-lead-offers', async (req, res) => {
   try {
@@ -2097,6 +2109,14 @@ app.post('/webhook', async (req, res) => {
 
     if (!phone) {
       console.log('⚠️ Webhook sem telefone identificável.');
+      return res.sendStatus(200);
+    }
+
+    if (!buttonId && !String(textMessage || '').trim()) {
+      console.log('ℹ️ Evento vazio recebido. Ignorando sem alterar lead:', {
+        phone,
+        type: data?.type || data?.event || null,
+      });
       return res.sendStatus(200);
     }
 
