@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS + LEAD AUTO');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS + LEAD AUTO + DIGITAÇÃO + ASSINATURA');
 
 const express = require('express');
 const axios = require('axios');
@@ -36,6 +36,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
 const NUMON_OFFER_IMAGE_URL = process.env.NUMON_OFFER_IMAGE_URL || '';
+const SIGNATURE_CONFIRM_DELAY_MS = Number(process.env.SIGNATURE_CONFIRM_DELAY_MS || 180000);
 
 const DEFAULT_USER_ID =
   process.env.NUMON_DEFAULT_USER_ID || '3b7cfecb-dd1f-4419-9ab0-21d57d1e0b9f';
@@ -48,11 +49,16 @@ const conversationState = {};
 const STAGE_NEW_LEAD = 'Novo lead';
 const STAGE_IN_ATTENDANCE = 'Em atendimento';
 const STAGE_IN_PROPOSAL = 'Em proposta';
+const STAGE_IN_DIGITATION = 'Em digitação';
+const STAGE_SIGNED = 'Assinado';
 
 const STATUS_NEW_LEAD = 'Novo lead';
 const STATUS_IN_ATTENDANCE = 'Em atendimento';
 const STATUS_IN_PROPOSAL = 'Em proposta';
 const STATUS_OFFER_CHOSEN = 'Oferta escolhida';
+const STATUS_IN_DIGITATION = 'Em digitação';
+const STATUS_SIGNATURE_LINK_SENT = 'Link de assinatura enviado';
+const STATUS_SIGNED = 'Assinado';
 
 // ========================
 // UTILS
@@ -97,7 +103,7 @@ function isHotLead(lead) {
 
   const etapa = String(lead.etapa || '').trim().toLowerCase();
 
-  return ['em atendimento', 'em proposta'].includes(etapa);
+  return ['em atendimento', 'em proposta', 'em digitação'].includes(etapa);
 }
 
 function renderTemplate(templateText, variables = {}) {
@@ -515,7 +521,6 @@ function getWebhookContactName(data) {
       ''
   );
 }
-
 function getPhoneMatchScore(incomingPhone, savedPhone) {
   const incoming = normalizePhone(incomingPhone);
   const saved = normalizePhone(savedPhone);
@@ -658,6 +663,68 @@ function sanitizeOfferForSending(offer) {
     ...offer,
     zapi_button_id: `OFFER_${offer.id}`,
   };
+}
+
+// ========================
+// MENSAGENS DO FLUXO DE DIGITAÇÃO / ASSINATURA
+// ========================
+function buildOfferChosenNextStepMessage(summary) {
+  return [
+    'Perfeito. Você escolheu esta opção:',
+    '',
+    summary,
+    '',
+    'Agora vamos seguir para a etapa de validação dos dados obrigatórios para digitação da proposta no banco.',
+    '',
+    'Você prefere enviar os dados por aqui ou confirmar por ligação?',
+  ].join('\n');
+}
+
+function buildSignatureLinkMessage(signatureLink) {
+  return [
+    'Sua proposta já foi digitada no banco.',
+    '',
+    'Agora falta apenas concluir a assinatura digital do contrato.',
+    '',
+    'Acesse o link abaixo, envie o documento de identificação com foto e realize a biometria facial conforme solicitado:',
+    '',
+    signatureLink,
+    '',
+    'Depois de concluir a assinatura, volte aqui no WhatsApp e confirme para seguirmos com a finalização.',
+  ].join('\n');
+}
+
+function buildSignatureConfirmationQuestion() {
+  return [
+    'Você conseguiu concluir a assinatura digital do contrato?',
+    '',
+    'Se já concluiu o envio do documento e a biometria facial, confirme abaixo.',
+  ].join('\n');
+}
+
+function buildSignedFinalMessage() {
+  return [
+    'Contrato assinado com sucesso.',
+    '',
+    'Agora o pagamento costuma ocorrer em até 24 horas úteis, conforme análise e processamento do banco.',
+    '',
+    'Caso tenha qualquer dúvida, pode falar conosco por este mesmo número.',
+    '',
+    'Ficou alguma dúvida até aqui?',
+    '',
+    'A NumON agradece a sua confiança.',
+    '',
+    'Se você conhece alguém que também trabalha com carteira assinada e pode precisar de crédito, pode nos indicar.',
+    '',
+    'Pagamos comissão por indicação aprovada e contratada.',
+    '',
+    'Siga também a NumON nas redes sociais:',
+    '',
+    'Instagram: @numonpromotora',
+    'Facebook: Numon Promotora de Crédito',
+    '',
+    'Atendimento finalizado por aqui. Continuamos à disposição sempre que precisar.',
+  ].join('\n');
 }
 
 // ========================
@@ -865,7 +932,6 @@ async function createLeadFromPhone(phone, options = {}) {
     return existingLead;
   }
 }
-
 async function getOrCreateLeadByPhone(phone, options = {}) {
   const existingLead = await getLeadByPhone(phone);
 
@@ -1097,8 +1163,8 @@ async function markOfferAsChosen(offer) {
     selected_offer_id: offer.id,
     selected_offer_summary: summary,
     selected_offer_chosen_at: now,
-    etapa: STAGE_IN_PROPOSAL,
-    status: STATUS_OFFER_CHOSEN,
+    etapa: STAGE_IN_DIGITATION,
+    status: STATUS_IN_DIGITATION,
     is_archived: false,
   });
 
@@ -1221,7 +1287,6 @@ async function getLeadTriageAnswers(leadId) {
 
   return Array.isArray(response.data) ? response.data : [];
 }
-
 async function markLeadReadyForPresimulationByPhone(phone, messageText) {
   const normalizedPhone = normalizePhone(phone);
   const lead = await getOrCreateLeadByPhone(normalizedPhone, {
@@ -1610,6 +1675,66 @@ async function sendLeadOffersCarousel({ lead, offers }) {
 }
 
 // ========================
+// ASSINATURA / DIGITAÇÃO
+// ========================
+async function askDataValidationPreference({ phone, leadId, summary }) {
+  const message = buildOfferChosenNextStepMessage(summary);
+
+  await sendButtonList(
+    phone,
+    message,
+    [
+      { id: 'VALIDATE_BY_WHATSAPP', label: 'Enviar dados por aqui' },
+      { id: 'VALIDATE_BY_CALL', label: 'Prefiro confirmar por ligação' },
+    ],
+    leadId
+  );
+
+  if (leadId) {
+    await updateLeadMessageInfo(leadId, message);
+  }
+}
+
+async function requestSignatureConfirmationLater({ phone, leadId }) {
+  const delay = Number.isFinite(SIGNATURE_CONFIRM_DELAY_MS)
+    ? SIGNATURE_CONFIRM_DELAY_MS
+    : 180000;
+
+  setTimeout(async () => {
+    try {
+      const message = buildSignatureConfirmationQuestion();
+
+      await sendButtonList(
+        phone,
+        message,
+        [
+          { id: 'SIGNATURE_CONFIRMED', label: 'Contrato assinado' },
+          { id: 'SIGNATURE_HELP', label: 'Tive dificuldade' },
+        ],
+        leadId
+      );
+
+      if (leadId) {
+        await updateLeadFields(leadId, {
+          signature_confirmation_requested_at: new Date().toISOString(),
+        });
+
+        await updateLeadMessageInfo(leadId, message);
+      }
+
+      console.log('✅ Pergunta de confirmação de assinatura enviada:', {
+        phone,
+        leadId,
+      });
+    } catch (error) {
+      console.error(
+        '❌ Erro ao enviar pergunta de confirmação de assinatura:',
+        error.response?.data || error.message
+      );
+    }
+  }, delay);
+}
+// ========================
 // IA
 // ========================
 function buildAiInstructions() {
@@ -1970,6 +2095,97 @@ app.post('/send-lead-offers', async (req, res) => {
 });
 
 // ========================
+// ASSINATURA - ENVIO DE LINK
+// ========================
+app.post('/send-signature-link', async (req, res) => {
+  try {
+    if (!requireBackendApiKey(req, res)) return;
+
+    const { leadId, signatureLink } = req.body;
+
+    const normalizedLeadId = normalizeUuid(leadId);
+    const cleanLink = String(signatureLink || '').trim();
+
+    if (!isUuid(normalizedLeadId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'leadId inválido',
+      });
+    }
+
+    if (!cleanLink || !/^https?:\/\//i.test(cleanLink)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Link de assinatura inválido. Informe um link começando com http ou https.',
+      });
+    }
+
+    const lead = await getLeadById(normalizedLeadId);
+
+    if (!lead) {
+      return res.status(404).json({
+        success: false,
+        error: 'Lead não encontrado',
+      });
+    }
+
+    const phone = normalizePhone(lead.telefone);
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        error: 'Lead sem telefone válido',
+      });
+    }
+
+    const now = new Date().toISOString();
+    const message = buildSignatureLinkMessage(cleanLink);
+
+    await updateLeadFields(lead.id, {
+      signature_link: cleanLink,
+      signature_sent_at: now,
+      etapa: STAGE_IN_DIGITATION,
+      status: STATUS_SIGNATURE_LINK_SENT,
+      is_archived: false,
+    });
+
+    await sendText(phone, message, lead.id);
+    await updateLeadMessageInfo(lead.id, message);
+
+    await createAutomationLog({
+      userId: lead.user_id,
+      leadId: lead.id,
+      fromStage: lead.etapa || STAGE_IN_DIGITATION,
+      toStage: STAGE_IN_DIGITATION,
+      phone,
+      leadName: lead.nome,
+      messageText: message,
+      status: 'signature_link_sent',
+      errorMessage: null,
+    });
+
+    await requestSignatureConfirmationLater({
+      phone,
+      leadId: lead.id,
+    });
+
+    return res.json({
+      success: true,
+      leadId: lead.id,
+      signatureLink: cleanLink,
+      signatureSentAt: now,
+      confirmationDelayMs: SIGNATURE_CONFIRM_DELAY_MS,
+    });
+  } catch (error) {
+    console.error('❌ ERRO EM /send-signature-link:', error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Erro interno ao enviar link de assinatura',
+    });
+  }
+});
+// ========================
 // IA - ENDPOINT DE SUGESTÃO
 // ========================
 app.post('/generate-reply', async (req, res) => {
@@ -1999,7 +2215,7 @@ app.post('/generate-reply', async (req, res) => {
         blocked: true,
         reason: 'Lead não está em etapa qualificada para IA',
         currentStage: lead.etapa || null,
-        allowedStages: ['Em atendimento', 'Em proposta'],
+        allowedStages: ['Em atendimento', 'Em proposta', 'Em digitação'],
       });
     }
 
@@ -2240,9 +2456,103 @@ app.post('/webhook', async (req, res) => {
 
         const result = await markOfferAsChosen(offer);
 
+        await askDataValidationPreference({
+          phone,
+          leadId: offer.lead_id,
+          summary: result.summary,
+        });
+
+        return res.sendStatus(200);
+      }
+
+      if (buttonId === 'VALIDATE_BY_WHATSAPP') {
+        const lead = await getLeadByPhone(phone);
+
+        if (lead?.id) {
+          await updateLeadFields(lead.id, {
+            data_validation_preference: 'whatsapp',
+            etapa: STAGE_IN_DIGITATION,
+            status: 'Aguardando dados para digitação',
+            is_archived: false,
+          });
+        }
+
         await sendText(
           phone,
-          `Perfeito. Você escolheu esta opção:\n\n${result.summary}\n\nVou seguir com a próxima etapa da proposta.`
+          'Perfeito. Me envie os dados abaixo, por favor:\n\nNome completo:\nCPF:\nRG:\nUF de emissão do documento:\nNome da mãe:\nEmail:\nEstado civil:\nCEP:\nEndereço completo:\nCidade e Estado:\nConta com dígito:\nAgência com dígito:\nPIX:\nBanco:',
+          lead?.id || null
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if (buttonId === 'VALIDATE_BY_CALL') {
+        const lead = await getLeadByPhone(phone);
+
+        if (lead?.id) {
+          await updateLeadFields(lead.id, {
+            data_validation_preference: 'call',
+            etapa: STAGE_IN_DIGITATION,
+            status: 'Cliente prefere validar por ligação',
+            is_archived: false,
+          });
+        }
+
+        await sendText(
+          phone,
+          'Perfeito. Vamos confirmar seus dados por ligação antes da digitação da proposta no banco.',
+          lead?.id || null
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if (buttonId === 'SIGNATURE_CONFIRMED') {
+        const lead = await getLeadByPhone(phone);
+        const now = new Date().toISOString();
+
+        if (lead?.id) {
+          await updateLeadFields(lead.id, {
+            etapa: STAGE_SIGNED,
+            status: STATUS_SIGNED,
+            signature_confirmed_by_client_at: now,
+            signed_at: now,
+            is_archived: false,
+          });
+
+          await saveLeadMessage({
+            leadId: lead.id,
+            direction: 'in',
+            messageText: '[ASSINATURA CONFIRMADA PELO CLIENTE]',
+          });
+        }
+
+        const finalMessage = buildSignedFinalMessage();
+
+        await sendText(phone, finalMessage, lead?.id || null);
+
+        if (lead?.id) {
+          await updateLeadMessageInfo(lead.id, finalMessage);
+        }
+
+        return res.sendStatus(200);
+      }
+
+      if (buttonId === 'SIGNATURE_HELP') {
+        const lead = await getLeadByPhone(phone);
+
+        if (lead?.id) {
+          await updateLeadFields(lead.id, {
+            etapa: STAGE_IN_DIGITATION,
+            status: 'Cliente com dificuldade na assinatura',
+            is_archived: false,
+          });
+        }
+
+        await sendText(
+          phone,
+          'Sem problema. Vou te ajudar com a assinatura. Me diga em qual etapa apareceu a dificuldade: abrir o link, anexar documento ou fazer a biometria facial?',
+          lead?.id || null
         );
 
         return res.sendStatus(200);
@@ -2473,51 +2783,46 @@ app.post('/webhook', async (req, res) => {
           },
         });
 
-        conversationState[phone] = 'aguardando_dados';
+        conversationState[phone] = 'aguardando_dados_finais';
 
         await sendText(
           phone,
-          'Perfeito. Para eu seguir com a análise, me envie seus dados neste formato:\n\nNome completo:\nCPF:\nData de nascimento:\nEmpresa onde trabalha:'
+          'Perfeito. Agora me envie, por favor:\n\nNome completo:\nCPF:\nData de nascimento:\nEmpresa onde trabalha:'
         );
 
         return res.sendStatus(200);
       }
-
-      console.log('ℹ️ Botão recebido sem regra mapeada:', buttonId);
-      return res.sendStatus(200);
     }
 
-    if (conversationState[phone] === 'aguardando_dados' && textMessage.trim()) {
+    if (conversationState[phone] === 'aguardando_dados_finais') {
       await markLeadReadyForPresimulationByPhone(phone, textMessage);
+      delete conversationState[phone];
 
       const ok = await sendTemplateFlow(phone, 'resposta_dados_recebidos');
 
       if (!ok) {
-        await sendText(phone, 'Recebi suas informações. Vou analisar e já retorno.');
+        await sendText(
+          phone,
+          'Perfeito, recebi seus dados. Vou iniciar a análise e retorno com as opções disponíveis.'
+        );
       }
 
-      conversationState[phone] = 'humano';
       return res.sendStatus(200);
     }
-
-    console.log('ℹ️ Mensagem recebida sem botão e sem estado aguardando dados:', {
-      phone,
-      state: conversationState[phone] || null,
-      textMessage,
-    });
 
     return res.sendStatus(200);
   } catch (error) {
     console.error('❌ ERRO NO WEBHOOK:', error.response?.data || error.message);
-    return res.sendStatus(500);
+
+    return res.sendStatus(200);
   }
 });
 
 // ========================
-// START
+// START SERVER
 // ========================
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`Rodando na porta ${PORT}`);
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
