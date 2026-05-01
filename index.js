@@ -36,7 +36,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
 const NUMON_OFFER_IMAGE_URL = process.env.NUMON_OFFER_IMAGE_URL || '';
-const SIGNATURE_CONFIRM_DELAY_MS = Number(process.env.SIGNATURE_CONFIRM_DELAY_MS || 180000);
+const SIGNATURE_CONFIRM_DELAY_MS = Number(process.env.SIGNATURE_CONFIRM_DELAY_MS || 60000);
 
 const DEFAULT_USER_ID =
   process.env.NUMON_DEFAULT_USER_ID || '3b7cfecb-dd1f-4419-9ab0-21d57d1e0b9f';
