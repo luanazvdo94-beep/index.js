@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS + LEAD AUTO');
 
 const express = require('express');
 const axios = require('axios');
@@ -37,6 +37,9 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
 const NUMON_OFFER_IMAGE_URL = process.env.NUMON_OFFER_IMAGE_URL || '';
 
+const DEFAULT_USER_ID =
+  process.env.NUMON_DEFAULT_USER_ID || '3b7cfecb-dd1f-4419-9ab0-21d57d1e0b9f';
+
 const conversationState = {};
 
 // ========================
@@ -54,11 +57,12 @@ const STATUS_OFFER_CHOSEN = 'Oferta escolhida';
 // ========================
 // UTILS
 // ========================
-function getSupabaseHeaders() {
+function getSupabaseHeaders(extraHeaders = {}) {
   return {
     apikey: SUPABASE_SERVICE_ROLE_KEY,
     Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
     'Content-Type': 'application/json',
+    ...extraHeaders,
   };
 }
 
@@ -501,6 +505,17 @@ function getWebhookText(data) {
   );
 }
 
+function getWebhookContactName(data) {
+  return cleanExtractedField(
+    data?.senderName ||
+      data?.pushName ||
+      data?.contactName ||
+      data?.notifyName ||
+      data?.chatName ||
+      ''
+  );
+}
+
 function getPhoneMatchScore(incomingPhone, savedPhone) {
   const incoming = normalizePhone(incomingPhone);
   const saved = normalizePhone(savedPhone);
@@ -797,6 +812,72 @@ async function getLeadByPhone(phone) {
   return null;
 }
 
+async function createLeadFromPhone(phone, options = {}) {
+  const normalizedPhone = normalizePhone(phone);
+
+  if (!normalizedPhone) return null;
+
+  const now = new Date().toISOString();
+
+  const payload = {
+    user_id: options.userId || DEFAULT_USER_ID,
+    nome: options.nome || null,
+    telefone: normalizedPhone,
+    produto: options.produto || 'Crédito do Trabalhador',
+    origem: options.origem || 'WhatsApp',
+    etapa: options.etapa || STAGE_NEW_LEAD,
+    status: options.status || STATUS_NEW_LEAD,
+    is_archived: false,
+    clt_ready_for_presimulation: false,
+    active_offer_round: 1,
+    last_client_interaction_at: now,
+    observacoes: options.observacoes || 'Lead criado automaticamente após resposta positiva no WhatsApp.',
+  };
+
+  try {
+    const response = await axios.post(
+      `${SUPABASE_URL}/rest/v1/leads?select=*`,
+      payload,
+      {
+        headers: getSupabaseHeaders({
+          Prefer: 'return=representation',
+        }),
+      }
+    );
+
+    const rows = Array.isArray(response.data) ? response.data : [];
+    const lead = rows[0] || null;
+
+    if (lead) {
+      console.log('✅ Lead criado automaticamente pelo WhatsApp:', {
+        leadId: lead.id,
+        telefone: lead.telefone,
+        etapa: lead.etapa,
+        status: lead.status,
+      });
+    }
+
+    return lead;
+  } catch (error) {
+    console.error('❌ Erro ao criar lead automático:', error.response?.data || error.message);
+
+    const existingLead = await getLeadByPhone(normalizedPhone);
+    return existingLead;
+  }
+}
+
+async function getOrCreateLeadByPhone(phone, options = {}) {
+  const existingLead = await getLeadByPhone(phone);
+
+  if (existingLead) return existingLead;
+
+  if (!options.createIfMissing) {
+    return null;
+  }
+
+  return createLeadFromPhone(phone, options);
+}
+
 async function getLeadById(leadId) {
   const normalizedLeadId = normalizeUuid(leadId);
 
@@ -1084,9 +1165,15 @@ async function saveTriageByPhone({
   questionText,
   answerValue,
   leadPatch = {},
+  createIfMissing = false,
+  createOptions = {},
 }) {
   const normalizedPhone = normalizePhone(phone);
-  const lead = await getLeadByPhone(normalizedPhone);
+
+  const lead = await getOrCreateLeadByPhone(normalizedPhone, {
+    createIfMissing,
+    ...createOptions,
+  });
 
   await saveLeadTriageAnswer({
     leadId: lead?.id || null,
@@ -1097,7 +1184,7 @@ async function saveTriageByPhone({
   });
 
   if (!lead?.id) {
-    console.log('❌ Triagem salva sem lead_id porque lead não foi encontrado:', {
+    console.log('❌ Triagem salva sem lead_id porque lead não foi encontrado/criado:', {
       phone: normalizedPhone,
       questionKey,
       answerValue,
@@ -1106,11 +1193,18 @@ async function saveTriageByPhone({
     return null;
   }
 
+  await updateLeadFields(lead.id, {
+    last_client_interaction_at: new Date().toISOString(),
+  });
+
   if (Object.keys(leadPatch).length > 0) {
     await updateLeadFields(lead.id, leadPatch);
   }
 
-  return lead;
+  return {
+    ...lead,
+    ...leadPatch,
+  };
 }
 
 async function getLeadTriageAnswers(leadId) {
@@ -1130,10 +1224,16 @@ async function getLeadTriageAnswers(leadId) {
 
 async function markLeadReadyForPresimulationByPhone(phone, messageText) {
   const normalizedPhone = normalizePhone(phone);
-  const lead = await getLeadByPhone(normalizedPhone);
+  const lead = await getOrCreateLeadByPhone(normalizedPhone, {
+    createIfMissing: true,
+    etapa: STAGE_IN_ATTENDANCE,
+    status: STATUS_IN_ATTENDANCE,
+    origem: 'WhatsApp',
+    produto: 'Crédito do Trabalhador',
+  });
 
   if (!lead) {
-    console.log('ℹ️ Lead não encontrado para marcar pré-simulação:', normalizedPhone);
+    console.log('ℹ️ Lead não encontrado/criado para marcar pré-simulação:', normalizedPhone);
     return null;
   }
 
@@ -1217,10 +1317,9 @@ async function upsertCompanySearchIndex(data) {
     `${SUPABASE_URL}/rest/v1/company_search_index?on_conflict=cnpj`,
     payload,
     {
-      headers: {
-        ...getSupabaseHeaders(),
+      headers: getSupabaseHeaders({
         Prefer: 'resolution=merge-duplicates',
-      },
+      }),
     }
   );
 
@@ -1262,10 +1361,9 @@ async function upsertCompanyProfile(data) {
     `${SUPABASE_URL}/rest/v1/company_profiles?on_conflict=cnpj`,
     payload,
     {
-      headers: {
-        ...getSupabaseHeaders(),
+      headers: getSupabaseHeaders({
         Prefer: 'resolution=merge-duplicates',
-      },
+      }),
     }
   );
 
@@ -2100,11 +2198,13 @@ app.post('/webhook', async (req, res) => {
     const phone = getWebhookPhone(data);
     const buttonId = getWebhookButtonId(data);
     const textMessage = getWebhookText(data);
+    const contactName = getWebhookContactName(data);
 
     console.log('📥 WEBHOOK RECEBIDO:', {
       phone,
       buttonId,
       textMessage,
+      contactName,
       hasButtonsResponseMessage: Boolean(data?.buttonsResponseMessage),
       type: data?.type || data?.event || null,
     });
@@ -2154,6 +2254,14 @@ app.post('/webhook', async (req, res) => {
           questionKey: 'interesse_credito_clt',
           questionText: 'Cliente demonstrou interesse em seguir com a análise?',
           answerValue: 'sim',
+          createIfMissing: true,
+          createOptions: {
+            nome: contactName || null,
+            origem: 'WhatsApp / Disparo',
+            produto: 'Crédito do Trabalhador',
+            etapa: STAGE_NEW_LEAD,
+            status: STATUS_NEW_LEAD,
+          },
           leadPatch: {
             etapa: STAGE_NEW_LEAD,
             status: STATUS_NEW_LEAD,
@@ -2184,6 +2292,7 @@ app.post('/webhook', async (req, res) => {
           questionKey: 'interesse_credito_clt',
           questionText: 'Cliente demonstrou interesse em seguir com a análise?',
           answerValue: 'nao',
+          createIfMissing: false,
           leadPatch: {
             status: 'Sem interesse',
             clt_ready_for_presimulation: false,
@@ -2205,6 +2314,14 @@ app.post('/webhook', async (req, res) => {
           questionKey: 'clt_is_working',
           questionText: 'Está trabalhando atualmente?',
           answerValue: 'sim',
+          createIfMissing: true,
+          createOptions: {
+            nome: contactName || null,
+            origem: 'WhatsApp / Disparo',
+            produto: 'Crédito do Trabalhador',
+            etapa: STAGE_NEW_LEAD,
+            status: STATUS_NEW_LEAD,
+          },
           leadPatch: {
             clt_is_working: true,
             etapa: STAGE_IN_ATTENDANCE,
@@ -2237,6 +2354,14 @@ app.post('/webhook', async (req, res) => {
           questionKey: 'clt_is_working',
           questionText: 'Está trabalhando atualmente?',
           answerValue: 'nao',
+          createIfMissing: true,
+          createOptions: {
+            nome: contactName || null,
+            origem: 'WhatsApp / Disparo',
+            produto: 'Crédito do Trabalhador',
+            etapa: STAGE_NEW_LEAD,
+            status: STATUS_NEW_LEAD,
+          },
           leadPatch: {
             clt_is_working: false,
             clt_ready_for_presimulation: false,
@@ -2259,6 +2384,14 @@ app.post('/webhook', async (req, res) => {
           questionKey: 'clt_employment_months',
           questionText: 'Há quanto tempo está na empresa atual?',
           answerValue: 'menos_3_meses',
+          createIfMissing: true,
+          createOptions: {
+            nome: contactName || null,
+            origem: 'WhatsApp / Disparo',
+            produto: 'Crédito do Trabalhador',
+            etapa: STAGE_IN_ATTENDANCE,
+            status: STATUS_IN_ATTENDANCE,
+          },
           leadPatch: {
             clt_employment_months: 2,
             clt_ready_for_presimulation: false,
@@ -2284,6 +2417,14 @@ app.post('/webhook', async (req, res) => {
           questionKey: 'clt_employment_months',
           questionText: 'Há quanto tempo está na empresa atual?',
           answerValue,
+          createIfMissing: true,
+          createOptions: {
+            nome: contactName || null,
+            origem: 'WhatsApp / Disparo',
+            produto: 'Crédito do Trabalhador',
+            etapa: STAGE_IN_ATTENDANCE,
+            status: STATUS_IN_ATTENDANCE,
+          },
           leadPatch: {
             clt_employment_months: months,
             etapa: STAGE_IN_ATTENDANCE,
@@ -2315,6 +2456,14 @@ app.post('/webhook', async (req, res) => {
           questionKey: 'clt_has_active_loan',
           questionText: 'Cliente possui consignado ativo?',
           answerValue: hasActiveLoan ? 'sim' : 'nao',
+          createIfMissing: true,
+          createOptions: {
+            nome: contactName || null,
+            origem: 'WhatsApp / Disparo',
+            produto: 'Crédito do Trabalhador',
+            etapa: STAGE_IN_ATTENDANCE,
+            status: STATUS_IN_ATTENDANCE,
+          },
           leadPatch: {
             clt_has_active_loan: hasActiveLoan,
             etapa: STAGE_IN_ATTENDANCE,
