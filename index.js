@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS');
 
 const express = require('express');
 const axios = require('axios');
@@ -926,14 +926,17 @@ async function markClientInteractionByPhone(phone, messageText = '') {
 // ========================
 // SUPABASE - OFERTAS
 // ========================
-async function getLeadOffersForSending(leadId) {
+async function getLeadOffersForSending(leadId, offerRound = 1) {
   const normalizedLeadId = normalizeUuid(leadId);
+  const normalizedOfferRound = Number(offerRound || 1);
 
   if (!isUuid(normalizedLeadId)) return [];
 
   const response = await axios.get(
     `${SUPABASE_URL}/rest/v1/lead_offers?lead_id=eq.${encodeURIComponent(
       normalizedLeadId
+    )}&offer_round=eq.${encodeURIComponent(
+      String(normalizedOfferRound)
     )}&status=in.("draft","sent")&select=*&order=offer_number.asc`,
     { headers: getSupabaseHeaders() }
   );
@@ -1000,6 +1003,8 @@ async function markOfferAsChosen(offer) {
   await axios.patch(
     `${SUPABASE_URL}/rest/v1/lead_offers?lead_id=eq.${encodeURIComponent(
       offer.lead_id
+    )}&offer_round=eq.${encodeURIComponent(
+      String(offer.offer_round || 1)
     )}&id=neq.${encodeURIComponent(offer.id)}&status=eq.sent`,
     {
       status: 'discarded',
@@ -1025,6 +1030,7 @@ async function markOfferAsChosen(offer) {
   console.log('✅ Oferta escolhida pelo cliente:', {
     offerId: offer.id,
     leadId: offer.lead_id,
+    offerRound: offer.offer_round || 1,
     summary,
   });
 
@@ -1486,7 +1492,7 @@ async function sendLeadOffersCarousel({ lead, offers }) {
   );
 
   const logText = [
-    '[OFERTAS ENVIADAS]',
+    `[OFERTAS ENVIADAS — RODADA ${lead.active_offer_round || 1}]`,
     ...offers.map((offer) => buildOfferSummary(offer)),
   ].join('\n');
 
@@ -1811,12 +1817,14 @@ app.post('/send-lead-offers', async (req, res) => {
       });
     }
 
-    const offers = await getLeadOffersForSending(normalizedLeadId);
+    const activeOfferRound = Number(lead.active_offer_round || 1);
+
+    const offers = await getLeadOffersForSending(normalizedLeadId, activeOfferRound);
 
     if (offers.length === 0) {
       return res.status(400).json({
         success: false,
-        error: 'Nenhuma oferta válida encontrada para envio',
+        error: `Nenhuma oferta válida encontrada para envio na rodada ${activeOfferRound}`,
       });
     }
 
@@ -1849,6 +1857,7 @@ app.post('/send-lead-offers', async (req, res) => {
     return res.json({
       success: true,
       leadId: lead.id,
+      offerRound: activeOfferRound,
       sent: offers.length,
       message: result.message,
     });
