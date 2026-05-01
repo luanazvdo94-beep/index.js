@@ -380,6 +380,114 @@ function parseNameCpfCompanyBirthDateFromText(text) {
   };
 }
 
+
+function parseContractDataFromText(text) {
+  const raw = compactText(text);
+
+  const labels = [
+    'nome completo',
+    'nome',
+    'cpf',
+    'rg',
+    'identidade',
+    'uf de emissão do documento',
+    'uf de emissao do documento',
+    'uf de emissão',
+    'uf de emissao',
+    'uf documento',
+    'nome da mãe',
+    'nome da mae',
+    'mãe',
+    'mae',
+    'email',
+    'e-mail',
+    'estado civil',
+    'cep',
+    'endereço completo',
+    'endereco completo',
+    'endereço',
+    'endereco',
+    'cidade e estado',
+    'cidade/estado',
+    'cidade estado',
+    'conta com dígito',
+    'conta com digito',
+    'conta',
+    'agência com dígito',
+    'agencia com digito',
+    'agência',
+    'agencia',
+    'pix',
+    'chave pix',
+    'banco',
+  ];
+
+  const getValue = (fieldLabels) => extractLabeledValue(raw, fieldLabels, labels);
+
+  const name = getValue(['nome completo', 'nome']);
+  const cpfFromLabel = getValue(['cpf']);
+  const rg = getValue(['rg', 'identidade']);
+  const documentUf = getValue([
+    'uf de emissão do documento',
+    'uf de emissao do documento',
+    'uf de emissão',
+    'uf de emissao',
+    'uf documento',
+  ]);
+  const motherName = getValue(['nome da mãe', 'nome da mae', 'mãe', 'mae']);
+  const email = getValue(['email', 'e-mail']);
+  const maritalStatus = getValue(['estado civil']);
+  const cep = getValue(['cep']);
+  const fullAddress = getValue([
+    'endereço completo',
+    'endereco completo',
+    'endereço',
+    'endereco',
+  ]);
+  const cityState = getValue(['cidade e estado', 'cidade/estado', 'cidade estado']);
+  const bankAccount = getValue(['conta com dígito', 'conta com digito', 'conta']);
+  const bankAgency = getValue(['agência com dígito', 'agencia com digito', 'agência', 'agencia']);
+  const pixKey = getValue(['pix', 'chave pix']);
+  const bankName = getValue(['banco']);
+
+  const cpfMatch = raw.match(/(\d{3}\.?\d{3}\.?\d{3}-?\d{2})/);
+  const cpf = cleanCPF(cpfFromLabel || (cpfMatch ? cpfMatch[1] : ''));
+
+  const emailMatch = raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  const fallbackEmail = email || (emailMatch ? emailMatch[0] : '');
+
+  const patch = {
+    nome: name || undefined,
+    cpf: cpf.length === 11 ? cpf : undefined,
+    rg: rg || undefined,
+    document_uf: documentUf ? documentUf.toUpperCase().slice(0, 2) : undefined,
+    mother_name: motherName || undefined,
+    email: fallbackEmail || undefined,
+    marital_status: maritalStatus || undefined,
+    cep: cep || undefined,
+    full_address: fullAddress || undefined,
+    city_state: cityState || undefined,
+    bank_account: bankAccount || undefined,
+    bank_agency: bankAgency || undefined,
+    pix_key: pixKey || undefined,
+    bank_name: bankName || undefined,
+  };
+
+  return Object.fromEntries(
+    Object.entries(patch).filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== '')
+  );
+}
+
+function buildContractDataReceivedMessage() {
+  return [
+    'Perfeito, recebi seus dados.',
+    '',
+    'Agora vou digitar sua proposta no banco. Assim que o contrato estiver disponível, envio o link de assinatura por aqui.',
+    '',
+    'No link de assinatura, você poderá anexar o documento de identificação com foto e realizar a biometria facial conforme solicitado.',
+  ].join('\n');
+}
+
 function stripBrazilCountryCode(phone) {
   const normalized = normalizePhone(phone);
 
@@ -2477,6 +2585,8 @@ app.post('/webhook', async (req, res) => {
           });
         }
 
+        conversationState[phone] = 'aguardando_dados_digitacao';
+
         await sendText(
           phone,
           'Perfeito. Me envie os dados abaixo, por favor:\n\nNome completo:\nCPF:\nRG:\nUF de emissão do documento:\nNome da mãe:\nEmail:\nEstado civil:\nCEP:\nEndereço completo:\nCidade e Estado:\nConta com dígito:\nAgência com dígito:\nPIX:\nBanco:',
@@ -2792,6 +2902,44 @@ app.post('/webhook', async (req, res) => {
 
         return res.sendStatus(200);
       }
+    }
+
+    if (conversationState[phone] === 'aguardando_dados_digitacao') {
+      const lead = await getOrCreateLeadByPhone(phone, {
+        createIfMissing: true,
+        nome: contactName || null,
+        origem: 'WhatsApp / Digitação',
+        produto: 'Crédito do Trabalhador',
+        etapa: STAGE_IN_DIGITATION,
+        status: STATUS_IN_DIGITATION,
+      });
+
+      const parsedContractData = parseContractDataFromText(textMessage);
+
+      if (lead?.id) {
+        await saveLeadTriageAnswer({
+          leadId: lead.id,
+          phone,
+          questionKey: 'dados_digitacao_contrato',
+          questionText: 'Dados completos para digitação da proposta no banco',
+          answerValue: textMessage,
+        });
+
+        await updateLeadFields(lead.id, {
+          ...parsedContractData,
+          etapa: STAGE_IN_DIGITATION,
+          status: 'Dados recebidos para digitação',
+          is_archived: false,
+          last_client_interaction_at: new Date().toISOString(),
+        });
+      }
+
+      delete conversationState[phone];
+
+      const confirmationMessage = buildContractDataReceivedMessage();
+      await sendText(phone, confirmationMessage, lead?.id || null);
+
+      return res.sendStatus(200);
     }
 
     if (conversationState[phone] === 'aguardando_dados_finais') {
