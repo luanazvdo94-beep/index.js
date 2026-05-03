@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS + LEAD AUTO + DIGITAÇÃO + ASSINATURA');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS + LEAD AUTO + DIGITAÇÃO + ASSINATURA + RECEPTIVO CLT');
 
 const express = require('express');
 const axios = require('axios');
@@ -59,6 +59,25 @@ const STATUS_OFFER_CHOSEN = 'Oferta escolhida';
 const STATUS_IN_DIGITATION = 'Em digitação';
 const STATUS_SIGNATURE_LINK_SENT = 'Link de assinatura enviado';
 const STATUS_SIGNED = 'Assinado';
+
+// ========================
+// CONSTANTES DO RECEPTIVO
+// ========================
+const RECEPTIVE_ORIGIN = 'WhatsApp / Receptivo';
+
+const RX_MENU_CLT = 'RX_MENU_CLT';
+const RX_MENU_FGTS = 'RX_MENU_FGTS';
+const RX_MENU_INSS = 'RX_MENU_INSS';
+const RX_MENU_HUMAN = 'RX_MENU_HUMAN';
+
+const RX_CLT_WORKING_YES = 'RX_CLT_WORKING_YES';
+const RX_CLT_WORKING_NO = 'RX_CLT_WORKING_NO';
+const RX_CLT_TIME_LT3 = 'RX_CLT_TIME_LT3';
+const RX_CLT_TIME_3_6 = 'RX_CLT_TIME_3_6';
+const RX_CLT_TIME_GT6 = 'RX_CLT_TIME_GT6';
+const RX_CLT_LOAN_YES = 'RX_CLT_LOAN_YES';
+const RX_CLT_LOAN_NO = 'RX_CLT_LOAN_NO';
+const RX_CLT_LOAN_UNKNOWN = 'RX_CLT_LOAN_UNKNOWN';
 
 // ========================
 // UTILS
@@ -833,6 +852,136 @@ function buildSignedFinalMessage() {
     '',
     'Atendimento finalizado por aqui. Continuamos à disposição sempre que precisar.',
   ].join('\n');
+}
+
+
+// ========================
+// MENSAGENS / REGRAS DO RECEPTIVO
+// ========================
+function buildReceptiveMenuMessage() {
+  return [
+    'Olá! Seja bem-vindo(a) à NumON Promotora.',
+    '',
+    'Para te direcionar corretamente, escolha uma opção:',
+  ].join('\n');
+}
+
+function buildReceptiveCltIntroMessage() {
+  return [
+    'Perfeito. O Crédito do Trabalhador é uma opção para quem trabalha registrado com carteira assinada.',
+    '',
+    'Antes de simular, preciso confirmar algumas informações rápidas.',
+    '',
+    'Você está trabalhando registrado atualmente?',
+  ].join('\n');
+}
+
+function buildReceptiveCltTimeMessage() {
+  return 'Você tem quanto tempo no emprego atual?';
+}
+
+function buildReceptiveCltLoanMessage() {
+  return [
+    'Certo. Agora me confirma uma coisa:',
+    '',
+    'Você já possui algum empréstimo descontado em folha ou consignado ativo?',
+  ].join('\n');
+}
+
+function buildReceptiveCltDataRequestMessage() {
+  return [
+    'Perfeito. Para eu iniciar a análise, envie por favor:',
+    '',
+    'Nome completo:',
+    'CPF:',
+    'Empresa onde trabalha:',
+    'Data de nascimento:',
+  ].join('\n');
+}
+
+function buildReceptiveNotWorkingMessage() {
+  return [
+    'Entendi. No momento, o Crédito do Trabalhador é voltado para quem está trabalhando com carteira assinada.',
+    '',
+    'Mas podemos verificar outras opções para você, como FGTS ou INSS, se for o seu caso.',
+  ].join('\n');
+}
+
+function isLeadInProtectedReceptiveFlow(lead) {
+  if (!lead) return false;
+
+  const etapa = String(lead.etapa || '').trim().toLowerCase();
+  const status = String(lead.status || '').trim().toLowerCase();
+
+  const protectedStages = [
+    'em atendimento',
+    'em proposta',
+    'em digitação',
+    'assinado',
+    'pago',
+    'pós-venda',
+    'pos-venda',
+  ];
+
+  if (protectedStages.includes(etapa)) return true;
+
+  return [
+    'oferta escolhida',
+    'aguardando dados para digitação',
+    'dados recebidos para digitação',
+    'cliente prefere validar por ligação',
+    'link de assinatura enviado',
+    'cliente com dificuldade na assinatura',
+    'assinado',
+    'pago',
+    'pago ao cliente',
+  ].includes(status);
+}
+
+function shouldSendReceptiveMenu({ textMessage, buttonId, lead }) {
+  if (buttonId) return false;
+
+  const text = String(textMessage || '').trim();
+  if (!text) return false;
+
+  if (conversationState[normalizePhone(lead?.telefone || '')]) return false;
+  if (isLeadInProtectedReceptiveFlow(lead)) return false;
+
+  const lower = text.toLowerCase();
+
+  const looksLikeInitialContact =
+    lower.length <= 160 ||
+    /\b(oi|olá|ola|bom dia|boa tarde|boa noite|quero|simular|simulação|simulacao|crédito|credito|fgts|inss|clt|atendente)\b/i.test(lower);
+
+  return looksLikeInitialContact;
+}
+
+async function sendReceptiveMenu(phone, leadId = null) {
+  await sendButtonList(
+    phone,
+    buildReceptiveMenuMessage(),
+    [
+      { id: RX_MENU_CLT, label: 'Crédito Trabalhador / CLT' },
+      { id: RX_MENU_FGTS, label: 'Antecipação FGTS' },
+      { id: RX_MENU_INSS, label: 'Consignado INSS' },
+      { id: RX_MENU_HUMAN, label: 'Falar com atendente' },
+    ],
+    leadId
+  );
+}
+
+async function getOrCreateReceptiveLead(phone, options = {}) {
+  return getOrCreateLeadByPhone(phone, {
+    createIfMissing: true,
+    nome: options.nome || null,
+    origem: RECEPTIVE_ORIGIN,
+    produto: options.produto || 'A definir',
+    etapa: options.etapa || STAGE_NEW_LEAD,
+    status: options.status || STATUS_NEW_LEAD,
+    observacoes:
+      options.observacoes ||
+      'Lead criado automaticamente a partir de atendimento receptivo no WhatsApp.',
+  });
 }
 
 // ========================
@@ -2668,6 +2817,280 @@ app.post('/webhook', async (req, res) => {
         return res.sendStatus(200);
       }
 
+      if (buttonId === RX_MENU_CLT) {
+        const lead = await getOrCreateReceptiveLead(phone, {
+          nome: contactName || null,
+          produto: 'Crédito do Trabalhador',
+          etapa: STAGE_NEW_LEAD,
+          status: STATUS_NEW_LEAD,
+        });
+
+        conversationState[phone] = 'receptivo_clt_aguardando_trabalho';
+
+        await sendButtonList(
+          phone,
+          buildReceptiveCltIntroMessage(),
+          [
+            { id: RX_CLT_WORKING_YES, label: 'Sim, estou trabalhando' },
+            { id: RX_CLT_WORKING_NO, label: 'Não estou trabalhando' },
+          ],
+          lead?.id || null
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if (buttonId === RX_MENU_FGTS) {
+        const lead = await getOrCreateReceptiveLead(phone, {
+          nome: contactName || null,
+          produto: 'FGTS',
+          etapa: STAGE_IN_ATTENDANCE,
+          status: STATUS_IN_ATTENDANCE,
+          observacoes: 'Cliente escolheu FGTS no menu receptivo do WhatsApp.',
+        });
+
+        await updateLeadFields(lead.id, {
+          produto: 'FGTS',
+          origem: RECEPTIVE_ORIGIN,
+          etapa: STAGE_IN_ATTENDANCE,
+          status: STATUS_IN_ATTENDANCE,
+          is_archived: false,
+        });
+
+        await sendText(
+          phone,
+          'Perfeito. Vou direcionar seu atendimento para antecipação do FGTS. Para agilizar, envie seu nome completo, CPF e data de nascimento.',
+          lead.id
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if (buttonId === RX_MENU_INSS) {
+        const lead = await getOrCreateReceptiveLead(phone, {
+          nome: contactName || null,
+          produto: 'Consignado INSS',
+          etapa: STAGE_IN_ATTENDANCE,
+          status: STATUS_IN_ATTENDANCE,
+          observacoes: 'Cliente escolheu INSS no menu receptivo do WhatsApp.',
+        });
+
+        await updateLeadFields(lead.id, {
+          produto: 'Consignado INSS',
+          origem: RECEPTIVE_ORIGIN,
+          etapa: STAGE_IN_ATTENDANCE,
+          status: STATUS_IN_ATTENDANCE,
+          is_archived: false,
+        });
+
+        await sendText(
+          phone,
+          'Perfeito. Vou direcionar seu atendimento para Consignado INSS. Para agilizar, envie seu nome completo, CPF e informe se você é aposentado, pensionista ou recebe benefício do INSS.',
+          lead.id
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if (buttonId === RX_MENU_HUMAN) {
+        const lead = await getOrCreateReceptiveLead(phone, {
+          nome: contactName || null,
+          produto: 'A definir',
+          etapa: STAGE_NEW_LEAD,
+          status: 'Atendimento humano solicitado',
+          observacoes: 'Cliente solicitou atendimento humano pelo menu receptivo do WhatsApp.',
+        });
+
+        await updateLeadFields(lead.id, {
+          produto: lead.produto || 'A definir',
+          origem: RECEPTIVE_ORIGIN,
+          etapa: STAGE_NEW_LEAD,
+          status: 'Atendimento humano solicitado',
+          is_archived: false,
+        });
+
+        await sendText(
+          phone,
+          'Certo. Vou te direcionar para um atendente. Para agilizar, envie por favor seu nome e diga rapidamente o que você precisa.',
+          lead.id
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if (buttonId === RX_CLT_WORKING_YES) {
+        const lead = await saveTriageByPhone({
+          phone,
+          questionKey: 'rx_clt_is_working',
+          questionText: 'Cliente receptivo está trabalhando registrado atualmente?',
+          answerValue: 'sim',
+          createIfMissing: true,
+          createOptions: {
+            nome: contactName || null,
+            origem: RECEPTIVE_ORIGIN,
+            produto: 'Crédito do Trabalhador',
+            etapa: STAGE_NEW_LEAD,
+            status: STATUS_NEW_LEAD,
+          },
+          leadPatch: {
+            produto: 'Crédito do Trabalhador',
+            origem: RECEPTIVE_ORIGIN,
+            clt_is_working: true,
+            etapa: STAGE_IN_ATTENDANCE,
+            status: STATUS_IN_ATTENDANCE,
+            is_archived: false,
+            clt_ready_for_presimulation: false,
+          },
+        });
+
+        conversationState[phone] = 'receptivo_clt_aguardando_tempo_empresa';
+
+        await sendButtonList(
+          phone,
+          buildReceptiveCltTimeMessage(),
+          [
+            { id: RX_CLT_TIME_LT3, label: 'Menos de 3 meses' },
+            { id: RX_CLT_TIME_3_6, label: '3 a 6 meses' },
+            { id: RX_CLT_TIME_GT6, label: 'Mais de 6 meses' },
+          ],
+          lead?.id || null
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if (buttonId === RX_CLT_WORKING_NO) {
+        const lead = await saveTriageByPhone({
+          phone,
+          questionKey: 'rx_clt_is_working',
+          questionText: 'Cliente receptivo está trabalhando registrado atualmente?',
+          answerValue: 'nao',
+          createIfMissing: true,
+          createOptions: {
+            nome: contactName || null,
+            origem: RECEPTIVE_ORIGIN,
+            produto: 'Crédito do Trabalhador',
+            etapa: STAGE_NEW_LEAD,
+            status: STATUS_NEW_LEAD,
+          },
+          leadPatch: {
+            produto: 'Crédito do Trabalhador',
+            origem: RECEPTIVE_ORIGIN,
+            clt_is_working: false,
+            clt_ready_for_presimulation: false,
+            status: 'Não elegível CLT',
+            is_archived: false,
+          },
+        });
+
+        delete conversationState[phone];
+
+        await sendButtonList(
+          phone,
+          buildReceptiveNotWorkingMessage(),
+          [
+            { id: RX_MENU_FGTS, label: 'Ver FGTS' },
+            { id: RX_MENU_INSS, label: 'Ver INSS' },
+            { id: RX_MENU_HUMAN, label: 'Falar com atendente' },
+          ],
+          lead?.id || null
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if ([RX_CLT_TIME_LT3, RX_CLT_TIME_3_6, RX_CLT_TIME_GT6].includes(buttonId)) {
+        const monthsMap = {
+          [RX_CLT_TIME_LT3]: 2,
+          [RX_CLT_TIME_3_6]: 6,
+          [RX_CLT_TIME_GT6]: 12,
+        };
+
+        const answerMap = {
+          [RX_CLT_TIME_LT3]: 'menos_3_meses',
+          [RX_CLT_TIME_3_6]: '3_a_6_meses',
+          [RX_CLT_TIME_GT6]: 'mais_6_meses',
+        };
+
+        const months = monthsMap[buttonId];
+        const answerValue = answerMap[buttonId];
+
+        const lead = await saveTriageByPhone({
+          phone,
+          questionKey: 'rx_clt_employment_months',
+          questionText: 'Tempo de empresa informado no receptivo CLT',
+          answerValue,
+          createIfMissing: true,
+          createOptions: {
+            nome: contactName || null,
+            origem: RECEPTIVE_ORIGIN,
+            produto: 'Crédito do Trabalhador',
+            etapa: STAGE_IN_ATTENDANCE,
+            status: STATUS_IN_ATTENDANCE,
+          },
+          leadPatch: {
+            produto: 'Crédito do Trabalhador',
+            origem: RECEPTIVE_ORIGIN,
+            clt_employment_months: months,
+            etapa: STAGE_IN_ATTENDANCE,
+            status: buttonId === RX_CLT_TIME_LT3 ? 'Baixa elegibilidade CLT' : STATUS_IN_ATTENDANCE,
+            is_archived: false,
+            clt_ready_for_presimulation: false,
+          },
+        });
+
+        conversationState[phone] = 'receptivo_clt_aguardando_consignado';
+
+        await sendButtonList(
+          phone,
+          buildReceptiveCltLoanMessage(),
+          [
+            { id: RX_CLT_LOAN_YES, label: 'Sim' },
+            { id: RX_CLT_LOAN_NO, label: 'Não' },
+            { id: RX_CLT_LOAN_UNKNOWN, label: 'Não sei' },
+          ],
+          lead?.id || null
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if ([RX_CLT_LOAN_YES, RX_CLT_LOAN_NO, RX_CLT_LOAN_UNKNOWN].includes(buttonId)) {
+        const hasActiveLoan = buttonId === RX_CLT_LOAN_YES;
+        const answerValue =
+          buttonId === RX_CLT_LOAN_YES ? 'sim' : buttonId === RX_CLT_LOAN_NO ? 'nao' : 'nao_sei';
+
+        const lead = await saveTriageByPhone({
+          phone,
+          questionKey: 'rx_clt_has_active_loan',
+          questionText: 'Cliente receptivo possui empréstimo descontado em folha ou consignado ativo?',
+          answerValue,
+          createIfMissing: true,
+          createOptions: {
+            nome: contactName || null,
+            origem: RECEPTIVE_ORIGIN,
+            produto: 'Crédito do Trabalhador',
+            etapa: STAGE_IN_ATTENDANCE,
+            status: STATUS_IN_ATTENDANCE,
+          },
+          leadPatch: {
+            produto: 'Crédito do Trabalhador',
+            origem: RECEPTIVE_ORIGIN,
+            clt_has_active_loan: hasActiveLoan,
+            etapa: STAGE_IN_ATTENDANCE,
+            status: STATUS_IN_ATTENDANCE,
+            is_archived: false,
+            clt_ready_for_presimulation: false,
+          },
+        });
+
+        conversationState[phone] = 'aguardando_dados_finais';
+
+        await sendText(phone, buildReceptiveCltDataRequestMessage(), lead?.id || null);
+
+        return res.sendStatus(200);
+      }
+
       if (buttonId === '1') {
         await saveTriageByPhone({
           phone,
@@ -2955,6 +3378,13 @@ app.post('/webhook', async (req, res) => {
         );
       }
 
+      return res.sendStatus(200);
+    }
+
+    const currentLeadForMenu = await getLeadByPhone(phone);
+
+    if (shouldSendReceptiveMenu({ textMessage, buttonId, lead: currentLeadForMenu })) {
+      await sendReceptiveMenu(phone, currentLeadForMenu?.id || null);
       return res.sendStatus(200);
     }
 
