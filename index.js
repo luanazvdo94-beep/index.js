@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS + LEAD AUTO + DIGITAÇÃO + ASSINATURA + RECEPTIVO CLT');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS + LEAD AUTO + DIGITAÇÃO + ASSINATURA + RECEPTIVO CLT V2');
 
 const express = require('express');
 const axios = require('axios');
@@ -910,6 +910,10 @@ function buildReceptiveNotWorkingMessage() {
 function isLeadInProtectedReceptiveFlow(lead) {
   if (!lead) return false;
 
+  // Lead arquivado/encerrado pode voltar ao receptivo.
+  // Isso permite que cliente antigo em Pós-venda/Fechado chame de novo e receba o menu.
+  if (lead.is_archived === true) return false;
+
   const etapa = String(lead.etapa || '').trim().toLowerCase();
   const status = String(lead.status || '').trim().toLowerCase();
 
@@ -917,10 +921,6 @@ function isLeadInProtectedReceptiveFlow(lead) {
     'em atendimento',
     'em proposta',
     'em digitação',
-    'assinado',
-    'pago',
-    'pós-venda',
-    'pos-venda',
   ];
 
   if (protectedStages.includes(etapa)) return true;
