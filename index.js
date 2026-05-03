@@ -1,4 +1,4 @@
-console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS + LEAD AUTO + DIGITAÇÃO + ASSINATURA + RECEPTIVO CLT V2');
+console.log('🔥 BACKEND NUMON ESTÁVEL + IA + CNPJ + BUSCA EMPRESA + TRIAGEM CLT + KANBAN AUTOMÁTICO + TELEFONE BR V3 + EMPRESA + NASCIMENTO + CONSIGNADO + OFERTAS CARROSSEL + BOTÕES FUNCIONAIS + RODADAS + LEAD AUTO + DIGITAÇÃO + ASSINATURA + RECEPTIVO CLT + TEMPO AJUSTADO V2');
 
 const express = require('express');
 const axios = require('axios');
@@ -2950,8 +2950,8 @@ app.post('/webhook', async (req, res) => {
           buildReceptiveCltTimeMessage(),
           [
             { id: RX_CLT_TIME_LT3, label: 'Menos de 3 meses' },
-            { id: RX_CLT_TIME_3_6, label: '3 a 6 meses' },
-            { id: RX_CLT_TIME_GT6, label: 'Mais de 6 meses' },
+            { id: RX_CLT_TIME_3_6, label: 'De 03 meses a 1 ano' },
+            { id: RX_CLT_TIME_GT6, label: 'Mais de 1 ano' },
           ],
           lead?.id || null
         );
@@ -3003,13 +3003,13 @@ app.post('/webhook', async (req, res) => {
         const monthsMap = {
           [RX_CLT_TIME_LT3]: 2,
           [RX_CLT_TIME_3_6]: 6,
-          [RX_CLT_TIME_GT6]: 12,
+          [RX_CLT_TIME_GT6]: 13,
         };
 
         const answerMap = {
           [RX_CLT_TIME_LT3]: 'menos_3_meses',
-          [RX_CLT_TIME_3_6]: '3_a_6_meses',
-          [RX_CLT_TIME_GT6]: 'mais_6_meses',
+          [RX_CLT_TIME_3_6]: '3_meses_a_1_ano',
+          [RX_CLT_TIME_GT6]: 'mais_1_ano',
         };
 
         const months = monthsMap[buttonId];
